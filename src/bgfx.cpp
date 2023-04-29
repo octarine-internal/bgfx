@@ -3562,6 +3562,7 @@ namespace bgfx
 			s_threadIndex = 0;
 			g_callback    = NULL;
 			g_allocator   = NULL;
+			g_platformData = {};
 			break;
 		}
 
@@ -3602,6 +3603,7 @@ namespace bgfx
 		s_threadIndex = 0;
 		g_callback    = NULL;
 		g_allocator   = NULL;
+		g_platformData = {};
 	}
 
 	void reset(uint32_t _width, uint32_t _height, uint32_t _flags, TextureFormat::Enum _format)
@@ -4672,7 +4674,7 @@ namespace bgfx
 		}
 
 		BGFX_ERROR_CHECK(
-			  formatSupported
+			  formatSupported || getRendererType() == RendererType::Direct3D9
 			, _err
 			, BGFX_ERROR_TEXTURE_VALIDATION
 			, "Texture format is not supported! "

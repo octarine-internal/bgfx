@@ -551,7 +551,8 @@ namespace bgfx { namespace d3d9
 
 			errorState = ErrorState::CreatedD3D9;
 
-			{
+			m_device = (IDirect3DDevice9*)g_platformData.context;
+			if (NULL == m_device) {
 				m_adapter    = D3DADAPTER_DEFAULT;
 				m_deviceType = BGFX_PCI_ID_SOFTWARE_RASTERIZER == g_caps.vendorId
 					? D3DDEVTYPE_REF
@@ -1570,7 +1571,7 @@ namespace bgfx { namespace d3d9
 			{
 				if (NULL != m_deviceEx)
 				{
-					DX_CHECK(m_deviceEx->WaitForVBlank(0) );
+					// DX_CHECK(m_deviceEx->WaitForVBlank(0) );
 				}
 
 				for (uint32_t ii = 0, num = m_numWindows; ii < num; ++ii)
@@ -1580,7 +1581,7 @@ namespace bgfx { namespace d3d9
 					{
 						if (m_needPresent)
 						{
-							hr = m_swapChain->Present(NULL, NULL, (HWND)g_platformData.nwh, NULL, 0);
+							// hr = m_swapChain->Present(NULL, NULL, (HWND)g_platformData.nwh, NULL, 0);
 							m_needPresent = false;
 						}
 						else
@@ -2290,7 +2291,6 @@ namespace bgfx { namespace d3d9
 
 		if (NULL == _data)
 		{
-			usage |= D3DUSAGE_DYNAMIC;
 			pool = D3DPOOL_DEFAULT;
 			m_dynamic = (uint8_t*)BX_ALLOC(g_allocator, _size);
 		}
@@ -2332,7 +2332,7 @@ namespace bgfx { namespace d3d9
 				;
 
 			DX_CHECK(s_renderD3D9->m_device->CreateIndexBuffer(m_size
-				, D3DUSAGE_WRITEONLY|D3DUSAGE_DYNAMIC
+				, D3DUSAGE_WRITEONLY
 				, format
 				, D3DPOOL_DEFAULT
 				, &m_ptr
@@ -2353,7 +2353,6 @@ namespace bgfx { namespace d3d9
 
 		if (NULL == _data)
 		{
-			usage |= D3DUSAGE_DYNAMIC;
 			pool = D3DPOOL_DEFAULT;
 			m_dynamic = (uint8_t*)BX_ALLOC(g_allocator, _size);
 		}
@@ -2385,7 +2384,7 @@ namespace bgfx { namespace d3d9
 		if (NULL != m_dynamic)
 		{
 			DX_CHECK(s_renderD3D9->m_device->CreateVertexBuffer(m_size
-				, D3DUSAGE_WRITEONLY|D3DUSAGE_DYNAMIC
+				, D3DUSAGE_WRITEONLY
 				, 0
 				, D3DPOOL_DEFAULT
 				, &m_ptr
@@ -3354,9 +3353,8 @@ namespace bgfx { namespace d3d9
 	{
 		if (m_needPresent)
 		{
-			HRESULT hr = m_swapChain->Present(NULL, NULL, m_hwnd, NULL, 0);
 			m_needPresent = false;
-			return hr;
+			// return m_swapChain->Present(NULL, NULL, m_hwnd, NULL, 0);
 		}
 
 		return S_OK;
@@ -3748,7 +3746,7 @@ namespace bgfx { namespace d3d9
 
 		uint32_t frameQueryIdx = UINT32_MAX;
 
-		device->BeginScene();
+		// device->BeginScene();
 		if (m_timerQuerySupport)
 		{
 			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
@@ -4566,7 +4564,7 @@ namespace bgfx { namespace d3d9
 			BGFX_D3D9_PROFILER_END();
 		}
 
-		device->EndScene();
+		// device->EndScene();
 	}
 } /* namespace d3d9 */ } // namespace bgfx
 

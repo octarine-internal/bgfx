@@ -6,6 +6,11 @@
 #ifndef __SHADERLIB_SH__
 #define __SHADERLIB_SH__
 
+#define DX9 (BGFX_SHADER_LANGUAGE_HLSL && (BGFX_SHADER_LANGUAGE_HLSL <= 300))
+#define DX11 (BGFX_SHADER_LANGUAGE_HLSL && (BGFX_SHADER_LANGUAGE_HLSL > 300))
+#define GL BGFX_SHADER_LANGUAGE_GLSL
+#define VK BGFX_SHADER_LANGUAGE_SPIRV
+
 vec4 encodeRE8(float _r)
 {
 	float exponent = ceil(log2(_r) );

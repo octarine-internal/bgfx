@@ -1106,6 +1106,13 @@ VK_IMPORT_DEVICE
 
 			ErrorState::Enum errorState = ErrorState::Default;
 
+			auto ctx = (VkContext*)g_platformData.context;
+			if (ctx != NULL) {
+				m_instance = (VkInstance)ctx->instance;
+				m_physicalDevice = (VkPhysicalDevice)ctx->physicalDevice;
+				m_device = (VkDevice)ctx->device;
+				m_globalQueue = (VkQueue)ctx->queue;
+			}
 			const bool headless = NULL == g_platformData.nwh;
 
 			const void* nextFeatures = NULL;
@@ -1286,7 +1293,7 @@ VK_IMPORT
 					BX_UNUSED(s_allocationCb);
 				}
 
-				result = vkCreateInstance(
+				result = m_instance != VK_NULL_HANDLE ? VK_SUCCESS : vkCreateInstance(
 					  &ici
 					, m_allocatorCb
 					, &m_instance
@@ -1327,7 +1334,7 @@ VK_IMPORT_INSTANCE
 
 			m_debugReportCallback = VK_NULL_HANDLE;
 
-			if (s_extension[Extension::EXT_debug_report].m_supported)
+			if (s_extension[Extension::EXT_debug_report].m_supported && vkCreateDebugReportCallbackEXT != nullptr)
 			{
 				VkDebugReportCallbackCreateInfoEXT drcb;
 				drcb.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
@@ -1461,8 +1468,16 @@ VK_IMPORT_INSTANCE
 						;
 				}
 
-				m_physicalDevice = physicalDevices[physicalDeviceIdx];
-
+				if (m_physicalDevice != NULL) {
+					physicalDeviceIdx = 0;
+					for (uint32_t i = 0; i < numPhysicalDevices; i++)
+						if (physicalDevices[i] == m_physicalDevice) {
+							physicalDeviceIdx = i;
+							break;
+						}
+				} else
+					m_physicalDevice = physicalDevices[physicalDeviceIdx];
+ 
 				bx::memCopy(&s_extension[0], &physicalDeviceExtensions[physicalDeviceIdx][0], sizeof(s_extension) );
 
 				vkGetPhysicalDeviceProperties(m_physicalDevice, &m_deviceProperties);
@@ -1805,7 +1820,7 @@ VK_IMPORT_INSTANCE
 				dci.ppEnabledExtensionNames = enabledExtension;
 				dci.pEnabledFeatures = &m_deviceFeatures;
 
-				result = vkCreateDevice(
+				result = m_device != VK_NULL_HANDLE ? VK_SUCCESS : vkCreateDevice(
 					  m_physicalDevice
 					, &dci
 					, m_allocatorCb
@@ -1835,8 +1850,9 @@ VK_IMPORT_DEVICE
 				goto error;
 			}
 
-			vkGetDeviceQueue(m_device, m_globalQueueFamily, 0, &m_globalQueue);
-
+			if (m_globalQueue == NULL)
+				vkGetDeviceQueue(m_device, m_globalQueueFamily, 0, &m_globalQueue);
+ 
 			{
 				m_numFramesInFlight = _init.resolution.maxFrameLatency == 0
 					? BGFX_CONFIG_MAX_FRAME_LATENCY
@@ -2108,14 +2124,16 @@ VK_IMPORT_DEVICE
 			vkDestroy(m_pipelineCache);
 			vkDestroy(m_descriptorPool);
 
-			vkDestroyDevice(m_device, m_allocatorCb);
+			if (g_platformData.context == NULL)
+				vkDestroyDevice(m_device, m_allocatorCb);
 
 			if (VK_NULL_HANDLE != m_debugReportCallback)
 			{
 				vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, m_allocatorCb);
 			}
 
-			vkDestroyInstance(m_instance, m_allocatorCb);
+			if (g_platformData.context == NULL)
+				vkDestroyInstance(m_instance, m_allocatorCb);
 
 			bx::dlclose(m_vulkan1Dll);
 			m_vulkan1Dll  = NULL;
@@ -6919,7 +6937,11 @@ VK_DESTROY
 		m_sci.presentMode        = s_presentMode[presentModeIdx].mode;
 		m_sci.clipped            = VK_FALSE;
 
-		result = vkCreateSwapchainKHR(device, &m_sci, allocatorCb, &m_swapchain);
+		if (g_platformData.context != NULL) {
+			auto ctx = (VkContext*)g_platformData.context;
+			m_swapchain = (::VkSwapchainKHR)ctx->swapchain;
+		}
+		result = m_swapchain != NULL ? VK_SUCCESS : vkCreateSwapchainKHR(device, &m_sci, allocatorCb, &m_swapchain);
 		if (VK_SUCCESS != result)
 		{
 			BX_TRACE("Create swapchain error: vkCreateSwapchainKHR failed %d: %s.", result, getName(result) );
@@ -7030,7 +7052,8 @@ VK_DESTROY
 			release(m_renderDoneSemaphore[ii]);
 		}
 
-		release(m_swapchain);
+		if (g_platformData.context == NULL)
+			release(m_swapchain);
 	}
 
 	VkResult SwapChainVK::createAttachments(VkCommandBuffer _commandBuffer)
@@ -7328,7 +7351,9 @@ VK_DESTROY
 			m_lastImageRenderedSemaphore = m_renderDoneSemaphore[m_currentSemaphore];
 			m_currentSemaphore = (m_currentSemaphore + 1) % m_numSwapchainImages;
 
-			VkResult result = vkAcquireNextImageKHR(
+			if (g_platformData.context != NULL)
+				m_backBufferColorIdx = ((VkContext*)g_platformData.context)->currentImageIndex;
+			VkResult result = g_platformData.context != NULL ? VK_SUCCESS : vkAcquireNextImageKHR(
 				  device
 				, m_swapchain
 				, UINT64_MAX
@@ -7389,7 +7414,7 @@ VK_DESTROY
 			pi.pSwapchains        = &m_swapchain;
 			pi.pImageIndices      = &m_backBufferColorIdx;
 			pi.pResults           = NULL;
-			VkResult result = vkQueuePresentKHR(m_queue, &pi);
+			VkResult result = g_platformData.context != NULL ? VK_SUCCESS : vkQueuePresentKHR(m_queue, &pi);
 
 			switch (result)
 			{

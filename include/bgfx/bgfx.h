@@ -606,6 +606,15 @@ namespace bgfx
 	{
 	}
 
+	struct VkContext {
+		void* instance = nullptr;
+		void* physicalDevice = nullptr;
+		void* device = nullptr;
+		void* queue = nullptr;
+		void* swapchain = nullptr;
+		uint32_t currentImageIndex = 0;
+	};
+
 	/// Platform data.
 	///
 	/// @attention C99's equivalent binding is `bgfx_platform_data_t`.

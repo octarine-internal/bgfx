@@ -2309,7 +2309,7 @@ namespace bgfx { namespace d3d11
 					}
 					else
 					{
-						m_deviceCtx->Flush();
+						// m_deviceCtx->Flush();
 					}
 				}
 
