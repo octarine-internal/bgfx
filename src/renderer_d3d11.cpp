@@ -2348,7 +2348,7 @@ namespace bgfx { namespace d3d11
 
 		void updateMsaa(DXGI_FORMAT _format) const
 		{
-			for (uint32_t ii = 1, last = 0; ii < BX_COUNTOF(s_msaa); ++ii)
+			/*for (uint32_t ii = 1, last = 0; ii < BX_COUNTOF(s_msaa); ++ii)
 			{
 				uint32_t msaa = s_checkMsaa[ii];
 				uint32_t quality = 0;
@@ -2365,7 +2365,7 @@ namespace bgfx { namespace d3d11
 				{
 					s_msaa[ii] = s_msaa[last];
 				}
-			}
+			}*/
 		}
 
 		void updateNativeWindow()
