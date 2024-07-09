@@ -79,6 +79,40 @@ namespace bgfx
 	inline bool operator==(const UniformHandle& _lhs,    const UniformHandle&    _rhs) { return _lhs.idx == _rhs.idx; }
 }
 
+#ifdef NDEBUG
+#define _BGFX_TRACE(_format, ...) \
+	BX_MACRO_BLOCK_BEGIN          \
+	BX_MACRO_BLOCK_END
+
+#define _BGFX_WARN(_condition, _format, ...) \
+	BX_MACRO_BLOCK_BEGIN                     \
+	BX_MACRO_BLOCK_END
+
+#define _BGFX_ASSERT(_condition, _format, ...)                                                          \
+	BX_MACRO_BLOCK_BEGIN                                                                                \
+		if (!BX_IGNORE_C4127(_condition) )                                                              \
+		{                                                                                               \
+			std::abort(); \
+		}                                                                                               \
+	BX_MACRO_BLOCK_END
+
+#define BGFX_FATAL(_condition, _err, _format, ...) \
+	BX_MACRO_BLOCK_BEGIN                           \
+		if (!BX_IGNORE_C4127(_condition) )         \
+		{                                          \
+			abort();                          \
+		}                                          \
+	BX_MACRO_BLOCK_END
+
+#define BGFX_ERROR_CHECK(_condition, _err, _result, _msg, _format, ...) \
+	if (!BX_IGNORE_C4127(_condition) )                                  \
+	{                                                                   \
+		BX_ERROR_SET(_err, _result, _msg);                              \
+		return;                                                         \
+	}
+
+#else // !_NDEBUG
+
 #define _BGFX_TRACE(_format, ...)                                                       \
 	BX_MACRO_BLOCK_BEGIN                                                                \
 		bgfx::trace(__FILE__, uint16_t(__LINE__), "BGFX " _format "\n", ##__VA_ARGS__); \
@@ -121,6 +155,7 @@ namespace bgfx
 			);                                                          \
 		return;                                                         \
 	}
+#endif
 
 #include <bx/allocator.h>
 #include <bx/bx.h>

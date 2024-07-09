@@ -442,7 +442,7 @@ namespace bgfx { namespace d3d11
 			;
 	}
 
-	static const char* getLostReason(HRESULT _hr)
+	const char* getLostReason(HRESULT _hr)
 	{
 		switch (_hr)
 		{
