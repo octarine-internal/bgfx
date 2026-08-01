@@ -860,6 +860,13 @@ namespace bgfx { namespace d3d11
 
 			m_device = (ID3D11Device*)g_platformData.context;
 
+			// the external device is borrowed from the embedder, but shutdown() releases
+			// m_device unconditionally; balance it here so we don't steal the embedder's ref
+			if (NULL != m_device)
+			{
+				m_device->AddRef();
+			}
+
 			if (!m_dxgi.init(g_caps) )
 			{
 				goto error;
