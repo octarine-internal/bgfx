@@ -2338,9 +2338,12 @@ VK_IMPORT_DEVICE
 		{
 		}
 
-		uintptr_t getInternal(TextureHandle /*_handle*/) override
+		uintptr_t getInternal(TextureHandle _handle) override
 		{
-			return 0;
+			// exposes the backing VkImage so an embedder can fill a bgfx-owned
+			// texture with its own transfer commands (see the backdrop capture);
+			// the embedder must leave the image in SHADER_READ_ONLY_OPTIMAL
+			return uintptr_t( (::VkImage)m_textures[_handle.idx].m_textureImage);
 		}
 
 		void destroyTexture(TextureHandle _handle) override
