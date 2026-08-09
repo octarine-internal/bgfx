@@ -6943,6 +6943,7 @@ VK_DESTROY
 		if (g_platformData.context != NULL) {
 			auto ctx = (VkContext*)g_platformData.context;
 			m_swapchain = (::VkSwapchainKHR)ctx->swapchain;
+			ctx->swapchainFormat = (uint32_t)m_sci.imageFormat;
 		}
 		result = m_swapchain != NULL ? VK_SUCCESS : vkCreateSwapchainKHR(device, &m_sci, allocatorCb, &m_swapchain);
 		if (VK_SUCCESS != result)

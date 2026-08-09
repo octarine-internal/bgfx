@@ -613,6 +613,10 @@ namespace bgfx
 		void* queue = nullptr;
 		void* swapchain = nullptr;
 		uint32_t currentImageIndex = 0;
+		/// VkFormat the renderer's image views over the adopted swapchain use, written back by
+		/// bgfx once the swapchain is wrapped. 0 until then. The embedder feeds it to the
+		/// backdrop capture so the copy-destination texture matches the real channel order.
+		uint32_t swapchainFormat = 0;
 	};
 
 	/// Platform data.
