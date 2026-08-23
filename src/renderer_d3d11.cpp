@@ -4782,6 +4782,13 @@ namespace bgfx { namespace d3d11
 
 	void TextureD3D11::overrideInternal(uintptr_t _ptr)
 	{
+		// Idempotent: a caller may re-assert the override every frame to self-heal a
+		// binding whose view was lost; an already-bound, sampleable texture is a no-op.
+		if (m_ptr == (ID3D11Resource*)_ptr && NULL != m_srv)
+		{
+			return;
+		}
+
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 
 		const bool readable = (m_srv != NULL);
@@ -4794,9 +4801,14 @@ namespace bgfx { namespace d3d11
 		m_flags |= BGFX_SAMPLER_INTERNAL_SHARED;
 		m_ptr = (ID3D11Resource*)_ptr;
 
-		if (readable)
+		// The desc inherited from the previous view can mismatch the incoming resource;
+		// fall back to a NULL desc, which D3D11 infers from any non-typeless resource,
+		// rather than silently leaving the texture without a view (it sampled black).
+		if (!readable
+		||  FAILED(s_renderD3D11->m_device->CreateShaderResourceView(m_ptr, &srvDesc, &m_srv) ) )
 		{
-			s_renderD3D11->m_device->CreateShaderResourceView(m_ptr, &srvDesc, &m_srv);
+			m_srv = NULL;
+			s_renderD3D11->m_device->CreateShaderResourceView(m_ptr, NULL, &m_srv);
 		}
 	}
 
