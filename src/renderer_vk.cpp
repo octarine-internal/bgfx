@@ -838,7 +838,6 @@ VK_IMPORT_DEVICE
 	template<> VkObjectType getType<VkBuffer             >() { return VK_OBJECT_TYPE_BUFFER;                }
 	template<> VkObjectType getType<VkCommandPool        >() { return VK_OBJECT_TYPE_COMMAND_POOL;          }
 	template<> VkObjectType getType<VkDescriptorPool     >() { return VK_OBJECT_TYPE_DESCRIPTOR_POOL;       }
-	template<> VkObjectType getType<VkDescriptorSet      >() { return VK_OBJECT_TYPE_DESCRIPTOR_SET;        }
 	template<> VkObjectType getType<VkDescriptorSetLayout>() { return VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT; }
 	template<> VkObjectType getType<VkDeviceMemory       >() { return VK_OBJECT_TYPE_DEVICE_MEMORY;         }
 	template<> VkObjectType getType<VkFence              >() { return VK_OBJECT_TYPE_FENCE;                 }
@@ -1065,9 +1064,6 @@ VK_IMPORT_DEVICE
 			, &imb
 			);
 	}
-
-#define MAX_DESCRIPTOR_SETS (1024 * BGFX_CONFIG_MAX_FRAME_LATENCY)
-
 	struct RendererContextVK : public RendererContextI
 	{
 		RendererContextVK()
@@ -1914,31 +1910,6 @@ VK_IMPORT_DEVICE
 			errorState = ErrorState::SwapChainCreated;
 
 			{
-				VkDescriptorPoolSize dps[] =
-				{
-					{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_SAMPLER,                MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MAX_DESCRIPTOR_SETS * 2                                },
-					{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-				};
-
-				VkDescriptorPoolCreateInfo dpci;
-				dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-				dpci.pNext = NULL;
-				dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-				dpci.maxSets       = MAX_DESCRIPTOR_SETS;
-				dpci.poolSizeCount = BX_COUNTOF(dps);
-				dpci.pPoolSizes    = dps;
-
-				result = vkCreateDescriptorPool(m_device, &dpci, m_allocatorCb, &m_descriptorPool);
-
-				if (VK_SUCCESS != result)
-				{
-					BX_TRACE("Init error: vkCreateDescriptorPool failed %d: %s.", result, getName(result) );
-					goto error;
-				}
-
 				VkPipelineCacheCreateInfo pcci;
 				pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 				pcci.pNext = NULL;
@@ -2030,7 +2001,6 @@ VK_IMPORT_DEVICE
 					m_scratchBuffer[ii].destroy();
 				}
 				vkDestroy(m_pipelineCache);
-				vkDestroy(m_descriptorPool);
 				BX_FALLTHROUGH;
 
 			case ErrorState::SwapChainCreated:
@@ -2122,7 +2092,6 @@ VK_IMPORT_DEVICE
 			m_cmd.shutdown();
 
 			vkDestroy(m_pipelineCache);
-			vkDestroy(m_descriptorPool);
 
 			if (g_platformData.context == NULL)
 				vkDestroyDevice(m_device, m_allocatorCb);
@@ -2611,7 +2580,11 @@ VK_IMPORT_DEVICE
 			bind.m_bind[0].m_idx = _blitter.m_texture.idx;
 			bind.m_bind[0].m_samplerFlags = (uint32_t)(texture.m_flags & BGFX_SAMPLER_BITS_MASK);
 
-			const VkDescriptorSet descriptorSet = getDescriptorSet(program, bind, scratchBuffer, NULL);
+			m_blitDescriptorSet = getDescriptorSet(program, bind, scratchBuffer, NULL);
+			if (VK_NULL_HANDLE == m_blitDescriptorSet)
+			{
+				return;
+			}
 
 			vkCmdBindDescriptorSets(
 				  m_commandBuffer
@@ -2619,7 +2592,7 @@ VK_IMPORT_DEVICE
 				, program.m_pipelineLayout
 				, 0
 				, 1
-				, &descriptorSet
+				, &m_blitDescriptorSet
 				, 1
 				, &bufferOffset
 				);
@@ -2640,7 +2613,7 @@ VK_IMPORT_DEVICE
 		void blitRender(TextVideoMemBlitter& _blitter, uint32_t _numIndices) override
 		{
 			const uint32_t numVertices = _numIndices*4/6;
-			if (0 < numVertices && m_backBuffer.isRenderable() )
+			if (VK_NULL_HANDLE != m_blitDescriptorSet && 0 < numVertices && m_backBuffer.isRenderable() )
 			{
 				m_indexBuffers[_blitter.m_ib->handle.idx].update(m_commandBuffer, 0, _numIndices*2, _blitter.m_ib->data);
 				m_vertexBuffers[_blitter.m_vb->handle.idx].update(m_commandBuffer, 0, numVertices*_blitter.m_layout.m_stride, _blitter.m_vb->data, true);
@@ -3764,19 +3737,17 @@ VK_IMPORT_DEVICE
 
 		VkDescriptorSet getDescriptorSet(const ProgramVK& program, const RenderBind& renderBind, const ScratchBufferVK& scratchBuffer, const float _palette[][4])
 		{
-			VkDescriptorSet descriptorSet;
-
-			VkDescriptorSetAllocateInfo dsai;
-			dsai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			dsai.pNext              = NULL;
-			dsai.descriptorPool     = m_descriptorPool;
-			dsai.descriptorSetCount = 1;
-			dsai.pSetLayouts        = &program.m_descriptorSetLayout;
-
-			VK_CHECK(vkAllocateDescriptorSets(m_device, &dsai, &descriptorSet) );
+			VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+			const VkResult result = m_cmd.m_commandList[m_cmd.m_currentFrameInFlight].m_descriptors.allocate(
+				program.m_descriptorSetLayout, &descriptorSet);
+			if (VK_SUCCESS != result)
+			{
+				BX_TRACE("Descriptor allocation failed %d: %s.", result, getName(result) );
+				return VK_NULL_HANDLE;
+			}
 
 			VkDescriptorImageInfo  imageInfo[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
-			VkDescriptorBufferInfo bufferInfo[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
+			VkDescriptorBufferInfo bufferInfo[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS + 2];
 
 			constexpr uint32_t kMaxDescriptorSets = 2 * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS + 2;
 			VkWriteDescriptorSet wds[kMaxDescriptorSets] = {};
@@ -3980,9 +3951,6 @@ VK_IMPORT_DEVICE
 			}
 
 			vkUpdateDescriptorSets(m_device, wdsCount, wds, 0, NULL);
-
-			VkDescriptorSet temp = descriptorSet;
-			release(temp);
 
 			return descriptorSet;
 		}
@@ -4427,7 +4395,7 @@ VK_IMPORT_DEVICE
 		VkDevice m_device;
 		uint32_t m_globalQueueFamily;
 		VkQueue  m_globalQueue;
-		VkDescriptorPool m_descriptorPool;
+		VkDescriptorSet m_blitDescriptorSet = VK_NULL_HANDLE;
 		VkPipelineCache  m_pipelineCache;
 
 		TimerQueryVK m_gpuTimer;
@@ -4526,26 +4494,12 @@ VK_DESTROY
 		}
 	}
 
-	void vkDestroy(VkDescriptorSet& _obj)
-	{
-		if (VK_NULL_HANDLE != _obj)
-		{
-			vkFreeDescriptorSets(s_renderVK->m_device, s_renderVK->m_descriptorPool, 1, &_obj);
-			_obj = VK_NULL_HANDLE;
-		}
-	}
-
 	void release(VkDeviceMemory& _obj)
 	{
 		s_renderVK->release(_obj);
 	}
 
 	void release(VkSurfaceKHR& _obj)
-	{
-		s_renderVK->release(_obj);
-	}
-
-	void release(VkDescriptorSet& _obj)
 	{
 		s_renderVK->release(_obj);
 	}
@@ -7726,6 +7680,13 @@ VK_DESTROY
 
 		for (uint32_t ii = 0; ii < m_numFramesInFlight; ++ii)
 		{
+			m_commandList[ii].m_descriptors.init({
+				s_renderVK->m_device, s_renderVK->m_allocatorCb,
+				vkCreateDescriptorPool, vkDestroyDescriptorPool,
+				vkResetDescriptorPool, vkAllocateDescriptorSets,
+				BGFX_CONFIG_MAX_TEXTURE_SAMPLERS
+			});
+
 			result = vkCreateCommandPool(
 				  s_renderVK->m_device
 				, &cpci
@@ -7780,6 +7741,7 @@ VK_DESTROY
 			vkDestroy(m_commandList[ii].m_fence);
 			m_commandList[ii].m_commandBuffer = VK_NULL_HANDLE;
 			vkDestroy(m_commandList[ii].m_commandPool);
+			m_commandList[ii].m_descriptors.shutdown();
 		}
 	}
 
@@ -7805,6 +7767,13 @@ VK_DESTROY
 			if (VK_SUCCESS != result)
 			{
 				BX_TRACE("Allocate command buffer error: vkResetCommandPool failed %d: %s.", result, getName(result) );
+				return result;
+			}
+
+			result = commandList.m_descriptors.reset();
+			if (VK_SUCCESS != result)
+			{
+				BX_TRACE("Reset descriptor pools failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
@@ -7937,7 +7906,6 @@ VK_DESTROY
 			case VK_OBJECT_TYPE_FRAMEBUFFER:           destroy<VkFramebuffer        >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_PIPELINE_LAYOUT:       destroy<VkPipelineLayout     >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_PIPELINE:              destroy<VkPipeline           >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_DESCRIPTOR_SET:        destroy<VkDescriptorSet      >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT: destroy<VkDescriptorSetLayout>(resource.m_handle); break;
 			case VK_OBJECT_TYPE_RENDER_PASS:           destroy<VkRenderPass         >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_SAMPLER:               destroy<VkSampler            >(resource.m_handle); break;
@@ -8385,6 +8353,10 @@ VK_DESTROY
 								, _render->m_colorPalette
 							);
 
+							if (VK_NULL_HANDLE == currentDescriptorSet)
+							{
+								break;
+							}
 							descriptorSetCount++;
 						}
 
@@ -8696,6 +8668,10 @@ VK_DESTROY
 								, _render->m_colorPalette
 							);
 
+							if (VK_NULL_HANDLE == currentDescriptorSet)
+							{
+								break;
+							}
 							descriptorSetCount++;
 						}
 

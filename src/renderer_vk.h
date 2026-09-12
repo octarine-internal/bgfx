@@ -34,6 +34,7 @@
 #include <vulkan-local/vulkan.h>
 #include "renderer.h"
 #include "debug_renderdoc.h"
+#include "descriptor_allocator_vk.h"
 
 #define VK_IMPORT                                                          \
 			VK_IMPORT_FUNC(false, vkCreateInstance);                       \
@@ -142,7 +143,6 @@
 			VK_IMPORT_DEVICE_FUNC(false, vkDestroyDescriptorPool);         \
 			VK_IMPORT_DEVICE_FUNC(false, vkResetDescriptorPool);           \
 			VK_IMPORT_DEVICE_FUNC(false, vkAllocateDescriptorSets);        \
-			VK_IMPORT_DEVICE_FUNC(false, vkFreeDescriptorSets);            \
 			VK_IMPORT_DEVICE_FUNC(false, vkUpdateDescriptorSets);          \
 			VK_IMPORT_DEVICE_FUNC(false, vkCreateQueryPool);               \
 			VK_IMPORT_DEVICE_FUNC(false, vkDestroyQueryPool);              \
@@ -294,7 +294,6 @@ namespace bgfx { namespace vk
 VK_DESTROY
 VK_DESTROY_FUNC(DeviceMemory);
 VK_DESTROY_FUNC(SurfaceKHR);
-VK_DESTROY_FUNC(DescriptorSet);
 #undef VK_DESTROY_FUNC
 
 	template<typename Ty>
@@ -826,6 +825,7 @@ VK_DESTROY_FUNC(DescriptorSet);
 			VkCommandPool m_commandPool = VK_NULL_HANDLE;
 			VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 			VkFence m_fence = VK_NULL_HANDLE;
+			DescriptorAllocatorVK m_descriptors;
 		};
 
 		CommandList m_commandList[BGFX_CONFIG_MAX_FRAME_LATENCY];
