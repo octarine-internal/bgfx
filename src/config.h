@@ -305,8 +305,20 @@ BX_STATIC_ASSERT(bx::isPowerOf2(BGFX_CONFIG_MAX_VIEWS), "BGFX_CONFIG_MAX_VIEWS m
 #endif // BGFX_CONFIG_MAX_TEXTURES
 
 #ifndef BGFX_CONFIG_MAX_TEXTURE_SAMPLERS
-#	define BGFX_CONFIG_MAX_TEXTURE_SAMPLERS 16
+// Octarine: a shipped Source 2 pixel shader reaches far past t16 - csgo_character needs 29
+// bind stages across its pair, and the weapon shader with its six sticker slots needs 59 -
+// and bgfx indexes its bind array by stage, so this is the ceiling on how many resources one
+// draw can carry. D3D11 allows 128 SRVs per stage, so the SRV side has room; samplers stay
+// clamped to sixteen at the call, which is D3D11's own limit.
+#	define BGFX_CONFIG_MAX_TEXTURE_SAMPLERS 64
 #endif // BGFX_CONFIG_MAX_TEXTURE_SAMPLERS
+
+/// Octarine: raw backend shaders (a shipped Source 2 DXBC) carried inside the bgfx shader
+/// container, with an explicit binding table instead of a bgfx uniform table. Every path this
+/// enables is selected by the container's version byte, so a normal shader is unaffected.
+#ifndef BGFX_CONFIG_OCT_NATIVE_SHADERS
+#	define BGFX_CONFIG_OCT_NATIVE_SHADERS 1
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 #ifndef BGFX_CONFIG_MAX_FRAME_BUFFERS
 #	define BGFX_CONFIG_MAX_FRAME_BUFFERS 128

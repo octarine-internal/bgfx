@@ -165,6 +165,7 @@ namespace bgfx
 			BC4,          //!< LATC1/ATI1 R8
 			BC5,          //!< LATC2/ATI2 RG8
 			BC6H,         //!< BC6H RGB16F
+			BC6H_UF16,    //!< BC6H RGB16F unsigned
 			BC7,          //!< BC7 RGB 4-7 bits per color channel, 0-8 bits alpha
 			ETC1,         //!< ETC1 RGB8
 			ETC2,         //!< ETC2 RGB8
@@ -2651,7 +2652,25 @@ namespace bgfx
 		, bool _destroyShader = false
 		);
 
-	/// Destroy program.
+	/// Octarine: write raw bytes into one of a native program's constant buffers, at the b register
+/// the shader declares. For the engine constant buffers a shipped Source 2 shader reads, which are
+/// far larger than a uniform can carry.
+///
+/// @param[in] _handle Program handle.
+/// @param[in] _fragment True for the fragment stage, false for the vertex stage.
+/// @param[in] _slot Constant buffer register.
+/// @param[in] _data Bytes to write.
+/// @param[in] _size Number of bytes.
+///
+void updateNativeConstantBuffer(
+	  ProgramHandle _handle
+	, bool _fragment
+	, uint8_t _slot
+	, const void* _data
+	, uint32_t _size
+	);
+
+/// Destroy program.
 	///
 	/// @param[in] _handle Program handle.
 	///
@@ -3355,7 +3374,23 @@ namespace bgfx
 	/// @param[in] _height Height of scissor region.
 	///
 	/// @attention C99's equivalent binding is `bgfx_set_view_scissor`.
-	///
+	/// Set view depth range. The rasterizer maps normalized device depth into
+/// [_min, _max], and a pixel shader reads the remapped value as SV_Position.z.
+/// Defaults to 0.0f and 1.0f, which is bgfx's behaviour without this call.
+///
+/// @param[in] _id View id.
+/// @param[in] _min Minimum depth, usually 0.0f.
+/// @param[in] _max Maximum depth, usually 1.0f.
+///
+/// @attention This is an octarine extension to bgfx.
+///
+void setViewDepthRange(
+	  ViewId _id
+	, float _min
+	, float _max
+	);
+
+///
 	void setViewScissor(
 		  ViewId _id
 		, uint16_t _x = 0

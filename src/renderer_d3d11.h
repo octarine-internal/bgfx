@@ -132,6 +132,93 @@ namespace bgfx { namespace d3d11
 		VertexLayoutHandle m_layoutHandle;
 	};
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	/// Octarine: one vertex input element of a native shader, taken verbatim from the shipped
+	/// shader's own input signature. bgfx's Attrib/AttribType pair cannot express these - the
+	/// semantics run past TEXCOORD7 and the formats include raw uint - so the element is carried
+	/// rather than derived.
+	struct NativeVertexAttrib
+	{
+		char     m_semantic[28];
+		uint32_t m_format;      // DXGI_FORMAT
+		uint16_t m_offset;      // byte offset within its stream
+		uint8_t  m_semanticIdx;
+		uint8_t  m_stream;
+		uint8_t  m_instanced;
+	};
+
+	/// Octarine: how many distinct values one externally fed constant buffer can hold at the
+	/// same time within a frame. The client draws one preview pane per CRenderScene and each
+	/// pane feeds its own copy of the large per view blocks, so this is the number of panes a
+	/// frame can carry before slices have to alias and the last writer wins again.
+	constexpr uint32_t kMaxNativeConstantBufferSlices = 8;
+
+	/// Octarine: how many times within a frame the buffer may switch between those slices.
+	/// Panes can interleave, so this is deliberately larger than the slice count.
+	constexpr uint32_t kMaxNativeConstantBufferUses = 16;
+
+	/// Octarine: one buffer of the ring behind a native constant buffer, with a CPU mirror of
+	/// what it holds. The mirror is what keeps the ring cheap: a slice whose mirror already
+	/// matches the incoming bytes is reused with no upload at all, which is the entire cost of
+	/// an ordinary frame that feeds one value.
+	struct NativeConstantBufferSlice
+	{
+		ID3D11Buffer* m_buffer;
+		uint8_t*      m_mirror;     //!< NULL until this slice has been written once.
+		uint32_t      m_mirrorSize; //!< Bytes the writer supplied; the rest of the buffer is zero.
+		uint32_t      m_frame;      //!< Frame this slice was last claimed in.
+	};
+
+	/// Octarine: a slice becoming the staged one, stamped with the renderer's monotonic set
+	/// counter at that moment. A draw records the same counter when it is submitted, so what it
+	/// binds when it finally executes is the slice that was staged when it was recorded rather
+	/// than whatever the last pane of the frame happened to write.
+	struct NativeConstantBufferUse
+	{
+		uint32_t m_set;
+		uint8_t  m_slice;
+	};
+
+	/// Octarine: one constant buffer a native shader declares. The bytes arrive through bgfx's
+	/// ordinary uniform transport - the pack declares one vec4-array uniform per buffer, so
+	/// setUniform writes it into the stage scratch - and this record says which b register it
+	/// lands in and where in that scratch it starts. A block too large for a uniform instead
+	/// arrives through updateNativeConstantBuffer and lives in the ring below.
+	struct NativeConstantBuffer
+	{
+		ID3D11Buffer* m_buffer;
+		uint32_t m_scratchOffset;
+		uint32_t m_size;
+		uint8_t  m_slot;
+
+		/// Octarine: ring state. Only a buffer fed from outside, which is one whose
+		/// m_scratchOffset is UINT32_MAX, ever grows past the single slice that wraps m_buffer;
+		/// a buffer on the uniform path is committed into m_buffer at submit as before.
+		NativeConstantBufferSlice m_slices[kMaxNativeConstantBufferSlices];
+		NativeConstantBufferUse   m_uses[kMaxNativeConstantBufferUses];
+		uint32_t m_ringFrame;  //!< Frame m_uses belongs to; anything older means nothing is staged.
+		uint8_t  m_numSlices;
+		uint8_t  m_numUses;
+		uint8_t  m_lastSlice;  //!< Slice the previous frame left staged.
+		bool     m_haveLast;
+	};
+
+	/// Octarine: where one bgfx bind stage lands in a native shader. bgfx has a single stage
+	/// indexed array shared by the vertex and pixel stages, while a Source 2 program puts
+	/// different resources at the same register on each stage - g_transformBuffer is the vs's
+	/// t12 and the fog cubemap is the ps's. The pack therefore assigns each resource its own
+	/// bind stage and records the register it belongs to, rather than the two being equal.
+	struct NativeResourceSlot
+	{
+		uint8_t m_bindStage;
+		uint8_t m_slot;
+	};
+
+	constexpr uint32_t kMaxNativeVertexAttribs = 24;
+	/// D3D11 allows fourteen constant buffers per stage.
+	constexpr uint32_t kMaxNativeConstantBuffers = 14;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 	struct ShaderD3D11
 	{
 		ShaderD3D11()
@@ -143,6 +230,13 @@ namespace bgfx { namespace d3d11
 			, m_numUniforms(0)
 			, m_numPredefined(0)
 			, m_hasDepthOp(false)
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			, m_native(false)
+			, m_numNativeAttribs(0)
+			, m_numNativeCBuffers(0)
+			, m_numNativeSrvs(0)
+			, m_numNativeSamplers(0)
+#endif
 		{
 		}
 
@@ -157,6 +251,45 @@ namespace bgfx { namespace d3d11
 			}
 
 			m_numPredefined = 0;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			for (uint8_t ii = 0; ii < m_numNativeCBuffers; ++ii)
+			{
+				NativeConstantBuffer& cbuffer = m_nativeCBuffers[ii];
+
+				// the ring's buffers go here rather than at renderer shutdown: this runs while the
+				// device is still alive, and a later pass over the shaders would not be
+				for (uint8_t jj = 0; jj < cbuffer.m_numSlices; ++jj)
+				{
+					NativeConstantBufferSlice& slice = cbuffer.m_slices[jj];
+
+					// slice zero is m_buffer under another name, released once just below
+					if (0 != jj)
+					{
+						DX_RELEASE(slice.m_buffer, 0);
+					}
+
+					slice.m_buffer = NULL;
+
+					if (NULL != slice.m_mirror)
+					{
+						bx::free(g_allocator, slice.m_mirror);
+						slice.m_mirror = NULL;
+					}
+				}
+
+				cbuffer.m_numSlices = 0;
+				cbuffer.m_numUses   = 0;
+				cbuffer.m_haveLast  = false;
+
+				DX_RELEASE(cbuffer.m_buffer, 0);
+			}
+
+			m_native = false;
+			m_numNativeAttribs = 0;
+			m_numNativeCBuffers = 0;
+			m_numNativeSrvs = 0;
+			m_numNativeSamplers = 0;
+#endif
 
 			if (NULL != m_buffer)
 			{
@@ -192,6 +325,17 @@ namespace bgfx { namespace d3d11
 		uint16_t m_numUniforms;
 		uint8_t m_numPredefined;
 		bool m_hasDepthOp;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		bool m_native;
+		uint8_t m_numNativeAttribs;
+		uint8_t m_numNativeCBuffers;
+		uint8_t m_numNativeSrvs;
+		uint8_t m_numNativeSamplers;
+		NativeResourceSlot m_nativeSrvs[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
+		NativeResourceSlot m_nativeSamplers[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
+		NativeVertexAttrib m_nativeAttribs[kMaxNativeVertexAttribs];
+		NativeConstantBuffer m_nativeCBuffers[kMaxNativeConstantBuffers];
+#endif
 	};
 
 	struct ProgramD3D11

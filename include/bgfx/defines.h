@@ -303,6 +303,8 @@
 #define BGFX_BUFFER_DRAW_INDIRECT                 UINT16_C(0x0400) //!< Buffer will be used for storing draw indirect commands.
 #define BGFX_BUFFER_ALLOW_RESIZE                  UINT16_C(0x0800) //!< Allow dynamic index/vertex buffer resize during update.
 #define BGFX_BUFFER_INDEX32                       UINT16_C(0x1000) //!< Index buffer contains 32-bit indices.
+#define BGFX_BUFFER_STRUCTURED                    UINT16_C(0x2000) //!< Octarine: bind as a StructuredBuffer of the layout's stride, rather than a typed buffer.
+#define BGFX_BUFFER_RAW                           UINT16_C(0x4000) //!< Octarine: bind as a ByteAddressBuffer.
 #define BGFX_BUFFER_COMPUTE_READ_WRITE (0 \
 	| BGFX_BUFFER_COMPUTE_READ \
 	| BGFX_BUFFER_COMPUTE_WRITE \
@@ -395,6 +397,12 @@
 
 #define BGFX_SAMPLER_NONE                         UINT32_C(0x00000000)
 #define BGFX_SAMPLER_SAMPLE_STENCIL               UINT32_C(0x00100000) //!< Sample stencil instead of depth.
+
+/// Per sampler max anisotropy, as log2 of the level: 0 uses the global value set by
+/// BGFX_RESET_MAXANISOTROPY, 1 is 2x, 2 is 4x, 3 is 8x and 4 is 16x. A shipped Source 2 shader
+/// mixes samplers of different anisotropy in one draw, which a single global value cannot express.
+#define BGFX_SAMPLER_OCT_ANISOTROPY_SHIFT         21
+#define BGFX_SAMPLER_OCT_ANISOTROPY_MASK          UINT32_C(0x00e00000)
 #define BGFX_SAMPLER_POINT (0 \
 	| BGFX_SAMPLER_MIN_POINT \
 	| BGFX_SAMPLER_MAG_POINT \
@@ -427,6 +435,7 @@
 	| BGFX_SAMPLER_MAG_MASK \
 	| BGFX_SAMPLER_MIP_MASK \
 	| BGFX_SAMPLER_COMPARE_MASK \
+	| BGFX_SAMPLER_OCT_ANISOTROPY_MASK \
 	)
 
 

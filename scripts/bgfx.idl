@@ -528,6 +528,7 @@ enum.TextureFormat { comment = "Texture formats:" }
 	.BC4      --- LATC1/ATI1 R8
 	.BC5      --- LATC2/ATI2 RG8
 	.BC6H     --- BC6H RGB16F
+	.BC6H_UF16 --- BC6H RGB16F unsigned
 	.BC7      --- BC7 RGB 4-7 bits per color channel, 0-8 bits alpha
 	.ETC1     --- ETC1 RGB8
 	.ETC2     --- ETC2 RGB8

@@ -401,6 +401,23 @@ namespace bgfx
 		return (_magic & BX_MAKEFOURCC(0, 0, 0, 0xff) ) < BX_MAKEFOURCC(0, 0, 0, _version);
 	}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	/// Octarine: the container version that means "raw backend shader". It is deliberately far
+	/// above any bgfx version, so isShaderVerLess's "too old" checks pass and every other reader
+	/// sees a well formed container that declares no uniforms and no attributes.
+#	define BGFX_SHADER_BIN_VERSION_NATIVE 0x80
+
+	/// Octarine: the tag that opens the native binding table, which sits after the standard
+	/// container trailer so nothing that does not know about it ever reads that far.
+#	define BGFX_SHADER_NATIVE_TAG BX_MAKEFOURCC('O', 'C', 'T', 'N')
+
+	inline bool isShaderNative(uint32_t _magic)
+	{
+		return BX_MAKEFOURCC(0, 0, 0, BGFX_SHADER_BIN_VERSION_NATIVE)
+			== (_magic & BX_MAKEFOURCC(0, 0, 0, 0xff) );
+	}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 	const char* getShaderTypeName(uint32_t _magic);
 
 	struct Clear
@@ -1750,6 +1767,14 @@ namespace bgfx
 		uint8_t  m_submitFlags;
 		uint8_t  m_streamMask;
 		uint8_t  m_uniformIdx;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: value of the renderer's external constant buffer counter when this draw was
+		/// recorded. Those buffers are written straight to the GPU at record time and shared by
+		/// every draw, so without this the frame's last writer would shade all of them - several
+		/// preview panes in one frame all take the last pane's lighting. Carrying it on the draw
+		/// rather than inferring it at submit also survives the sort reordering draws.
+		uint32_t m_nativeCBufferSet;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		IndexBufferHandle    m_indexBuffer;
 		VertexBufferHandle   m_instanceDataBuffer;
@@ -1999,6 +2024,7 @@ namespace bgfx
 		void reset()
 		{
 			setRect(0, 0, 1, 1);
+			setDepthRange(0.0f, 1.0f);
 			setScissor(0, 0, 0, 0);
 			setClear(BGFX_CLEAR_NONE, 0, 0.0f, 0);
 			setMode(ViewMode::Default);
@@ -2012,6 +2038,15 @@ namespace bgfx
 			m_rect.m_y      = uint16_t(bx::max<int16_t>(int16_t(_y), 0) );
 			m_rect.m_width  = bx::max<uint16_t>(_width,  1);
 			m_rect.m_height = bx::max<uint16_t>(_height, 1);
+		}
+
+		// the depth range the rasterizer maps clip space into. Source 2 draws the world with a
+		// MaxDepth below one and reserves the rest of the buffer, and the pixel shader reads the
+		// remapped value back as SV_Position.z
+		void setDepthRange(float _min, float _max)
+		{
+			m_depthMin = _min;
+			m_depthMax = _max;
 		}
 
 		void setScissor(uint16_t _x, uint16_t _y, uint16_t _width, uint16_t _height)
@@ -2070,6 +2105,8 @@ namespace bgfx
 		Matrix4 m_proj;
 		FrameBufferHandle m_fbh;
 		uint8_t m_mode;
+		float   m_depthMin;
+		float   m_depthMax;
 	};
 
 	struct FrameCache
@@ -3015,6 +3052,21 @@ namespace bgfx
 		virtual void destroyShader(ShaderHandle _handle) = 0;
 		virtual void createProgram(ProgramHandle _handle, ShaderHandle _vsh, ShaderHandle _fsh) = 0;
 		virtual void destroyProgram(ProgramHandle _handle) = 0;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: writes raw bytes into one of a native program's constant buffers. The
+		/// engine buffers a shipped Source 2 shader reads are tens of kilobytes, which is past
+		/// what a uniform can carry and past the stage scratch, so they are fed directly.
+		///
+		/// Returns a counter identifying the set of values now staged across all such buffers.
+		/// The write lands on the GPU immediately while the draws using it execute later, so a
+		/// draw has to record which staged set it belongs to; see RenderDraw::m_nativeCBufferSet.
+		virtual uint32_t updateNativeConstantBuffer(ProgramHandle /*_handle*/, bool /*_fragment*/
+			, uint8_t /*_slot*/, const void* /*_data*/, uint32_t /*_size*/)
+		{
+			return 0;
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		virtual void* createTexture(TextureHandle _handle, const Memory* _mem, uint64_t _flags, uint8_t _skip) = 0;
 		virtual void updateTextureBegin(TextureHandle _handle, uint8_t _side, uint8_t _mip) = 0;
 		virtual void updateTexture(TextureHandle _handle, uint8_t _side, uint8_t _mip, const Rect& _rect, uint16_t _z, uint16_t _depth, uint16_t _pitch, const Memory* _mem) = 0;
@@ -4418,7 +4470,14 @@ namespace bgfx
 			}
 
 			bimg::ImageContainer imageContainer;
-			if (bimg::imageParse(imageContainer, _mem->data, _mem->size) )
+			bx::Error parseError;
+			const bool parsed = bimg::imageParse(imageContainer, _mem->data, _mem->size, &parseError);
+			if (!parsed)
+			{
+				bx::debugPrintf("bgfx: imageParse failed: %.*s\n"
+					, parseError.getMessage().getLength(), parseError.getMessage().getPtr() );
+			}
+			if (parsed)
 			{
 				calcTextureSize(*_info
 					, (uint16_t)imageContainer.m_width
@@ -5016,6 +5075,11 @@ namespace bgfx
 		BGFX_API_FUNC(void setViewRect(ViewId _id, uint16_t _x, uint16_t _y, uint16_t _width, uint16_t _height) )
 		{
 			m_view[_id].setRect(_x, _y, _width, _height);
+		}
+
+		BGFX_API_FUNC(void setViewDepthRange(ViewId _id, float _min, float _max) )
+		{
+			m_view[_id].setDepthRange(_min, _max);
 		}
 
 		BGFX_API_FUNC(void setViewScissor(ViewId _id, uint16_t _x, uint16_t _y, uint16_t _width, uint16_t _height) )

@@ -306,6 +306,13 @@ namespace bgfx
 #endif
 
 	static Context* s_ctx = NULL;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	/// Octarine: the renderer's external constant buffer counter as last seen on this, the
+	/// recording, side. Every draw is stamped with it so that at submit each one binds the
+	/// values that were staged when it was recorded rather than the frame's last ones.
+	static uint32_t s_nativeCBufferSet = 0;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 	static bool s_renderFrameCalled = false;
 	InternalData g_internalData;
 	PlatformData g_platformData;
@@ -1280,6 +1287,9 @@ namespace bgfx
 		m_draw.m_uniformIdx   = m_uniformIdx;
 		m_draw.m_uniformBegin = m_uniformBegin;
 		m_draw.m_uniformEnd   = m_uniformEnd;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		m_draw.m_nativeCBufferSet = s_nativeCBufferSet;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		if (UINT8_MAX != m_draw.m_streamMask)
 		{
@@ -4366,6 +4376,19 @@ namespace bgfx
 		return s_ctx->createProgram(_csh, _destroyShader);
 	}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	void updateNativeConstantBuffer(ProgramHandle _handle, bool _fragment, uint8_t _slot
+		, const void* _data, uint32_t _size)
+	{
+		BGFX_CHECK_API_THREAD();
+		// bgfx is built single threaded here, so this lands before the frame's draws submit. A
+		// multithreaded build would have to route it through the command buffer like every other
+		// resource update.
+		s_nativeCBufferSet = s_ctx->m_renderCtx->updateNativeConstantBuffer(
+			_handle, _fragment, _slot, _data, _size);
+	}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 	void destroy(ProgramHandle _handle)
 	{
 		s_ctx->destroyProgram(_handle);
@@ -5186,6 +5209,12 @@ namespace bgfx
 		setViewRect(_id, _x, _y, width, height);
 	}
 
+	void setViewDepthRange(ViewId _id, float _min, float _max)
+	{
+		BX_ASSERT(checkView(_id), "Invalid view id: %d", _id);
+		s_ctx->setViewDepthRange(_id, _min, _max);
+	}
+
 	void setViewScissor(ViewId _id, uint16_t _x, uint16_t _y, uint16_t _width, uint16_t _height)
 	{
 		BX_ASSERT(checkView(_id), "Invalid view id: %d", _id);
@@ -5558,6 +5587,7 @@ BGFX_TEXTURE_FORMAT_BIMG(BC3);
 BGFX_TEXTURE_FORMAT_BIMG(BC4);
 BGFX_TEXTURE_FORMAT_BIMG(BC5);
 BGFX_TEXTURE_FORMAT_BIMG(BC6H);
+BGFX_TEXTURE_FORMAT_BIMG(BC6H_UF16);
 BGFX_TEXTURE_FORMAT_BIMG(BC7);
 BGFX_TEXTURE_FORMAT_BIMG(ETC1);
 BGFX_TEXTURE_FORMAT_BIMG(ETC2);

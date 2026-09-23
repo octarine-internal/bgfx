@@ -291,6 +291,7 @@ namespace bgfx { namespace webgpu
 		{ wgpu::TextureFormat::BC4RUnorm,           wgpu::TextureFormat::Undefined        },  // BC4  //  BC4RSnorm ??
 		{ wgpu::TextureFormat::BC5RGUnorm,          wgpu::TextureFormat::Undefined        },  // BC5  //  BC5RGSnorm ??
 		{ wgpu::TextureFormat::BC6HRGBUfloat,       wgpu::TextureFormat::Undefined        },  // BC6H //  BC6HRGBSfloat ??
+		{ wgpu::TextureFormat::BC6HRGBUfloat,       wgpu::TextureFormat::Undefined        },  // BC6H_UF16
 		{ wgpu::TextureFormat::BC7RGBAUnorm,        wgpu::TextureFormat::BC7RGBAUnormSrgb },  // BC7
 		{ wgpu::TextureFormat::Undefined,           wgpu::TextureFormat::Undefined        },  // ETC1
 		{ wgpu::TextureFormat::Undefined,           wgpu::TextureFormat::Undefined        },  // ETC2

@@ -230,6 +230,7 @@ namespace bgfx { namespace mtl
 		{ MTLPixelFormat(140/*BC4_RUnorm*/),            MTLPixelFormatInvalid,                       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // BC4
 		{ MTLPixelFormat(142/*BC5_RGUnorm*/),           MTLPixelFormatInvalid,                       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // BC5
 		{ MTLPixelFormat(150/*BC6H_RGBFloat*/),         MTLPixelFormatInvalid,                       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // BC6H
+		{ MTLPixelFormat(151/*BC6H_RGBUfloat*/),        MTLPixelFormatInvalid,                       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // BC6H_UF16
 		{ MTLPixelFormat(152/*BC7_RGBAUnorm*/),         MTLPixelFormat(153/*BC7_RGBAUnorm_sRGB*/),   MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // BC7
 		{ MTLPixelFormatInvalid,                        MTLPixelFormatInvalid,                       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // ETC1
 		{ MTLPixelFormat(180/*ETC2_RGB8*/),             MTLPixelFormat(181/*ETC2_RGB8_sRGB*/),       MTLReadWriteTextureTierNone, { $R, $G, $B, $A }, false }, // ETC2
@@ -747,6 +748,7 @@ BX_STATIC_ASSERT(BX_COUNTOF(s_accessNames) == Access::Count, "Invalid s_accessNa
 				g_caps.formats[TextureFormat::BC4 ] =
 				g_caps.formats[TextureFormat::BC5 ] =
 				g_caps.formats[TextureFormat::BC6H] =
+				g_caps.formats[TextureFormat::BC6H_UF16] =
 				g_caps.formats[TextureFormat::BC7 ] = BGFX_CAPS_FORMAT_TEXTURE_NONE;
 
 				g_caps.formats[TextureFormat::RG32F  ] &= ~(BGFX_CAPS_FORMAT_TEXTURE_FRAMEBUFFER_MSAA);

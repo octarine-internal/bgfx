@@ -209,6 +209,7 @@ namespace bgfx { namespace d3d11
 		{ DXGI_FORMAT_BC4_UNORM,          DXGI_FORMAT_BC4_UNORM,             DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // BC4
 		{ DXGI_FORMAT_BC5_UNORM,          DXGI_FORMAT_BC5_UNORM,             DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // BC5
 		{ DXGI_FORMAT_BC6H_SF16,          DXGI_FORMAT_BC6H_SF16,             DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // BC6H
+		{ DXGI_FORMAT_BC6H_UF16,          DXGI_FORMAT_BC6H_UF16,             DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // BC6H_UF16
 		{ DXGI_FORMAT_BC7_UNORM,          DXGI_FORMAT_BC7_UNORM,             DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_BC7_UNORM_SRGB       }, // BC7
 		{ DXGI_FORMAT_UNKNOWN,            DXGI_FORMAT_UNKNOWN,               DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // ETC1
 		{ DXGI_FORMAT_UNKNOWN,            DXGI_FORMAT_UNKNOWN,               DXGI_FORMAT_UNKNOWN,           DXGI_FORMAT_UNKNOWN              }, // ETC2
@@ -1805,6 +1806,207 @@ namespace bgfx { namespace d3d11
 			m_program[_handle.idx].create(&m_shaders[_vsh.idx], isValid(_fsh) ? &m_shaders[_fsh.idx] : NULL);
 		}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: begins a frame's worth of ring state for one externally fed buffer.
+		void resetNativeConstantBufferRing(NativeConstantBuffer& _cbuffer)
+		{
+			_cbuffer.m_ringFrame = m_nativeCBufferFrame;
+			_cbuffer.m_numUses   = 0;
+
+			// A draw recorded before this frame's first write still wants what the previous frame
+			// left staged, which is exactly what it would have got before the ring existed. Seed
+			// the record with that slice at the counter's current value: a draw recorded now
+			// carries the same value, so the lookup finds it.
+			if (_cbuffer.m_haveLast)
+			{
+				_cbuffer.m_uses[0].m_set   = m_nativeCBufferSet;
+				_cbuffer.m_uses[0].m_slice = _cbuffer.m_lastSlice;
+				_cbuffer.m_numUses = 1;
+
+				// and it has to survive the frame, so no new value may claim it
+				_cbuffer.m_slices[_cbuffer.m_lastSlice].m_frame = m_nativeCBufferFrame;
+			}
+		}
+
+		/// Octarine: picks a slice no draw recorded this frame can still be pointing at, growing
+		/// the ring if every existing one is spoken for.
+		uint8_t claimNativeConstantBufferSlice(NativeConstantBuffer& _cbuffer)
+		{
+			for (uint8_t ii = 0; ii < _cbuffer.m_numSlices; ++ii)
+			{
+				if (_cbuffer.m_slices[ii].m_frame != m_nativeCBufferFrame)
+				{
+					return ii;
+				}
+			}
+
+			if (_cbuffer.m_numSlices < kMaxNativeConstantBufferSlices)
+			{
+				const uint8_t idx = _cbuffer.m_numSlices++;
+				NativeConstantBufferSlice& slice = _cbuffer.m_slices[idx];
+
+				D3D11_BUFFER_DESC desc;
+				desc.ByteWidth = (_cbuffer.m_size + 0xf) & ~0xf;
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.CPUAccessFlags = 0;
+				desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+				desc.MiscFlags = 0;
+				desc.StructureByteStride = 0;
+
+				slice.m_buffer     = NULL;
+				slice.m_mirror     = NULL;
+				slice.m_mirrorSize = 0;
+				slice.m_frame      = 0;
+				DX_CHECK(m_device->CreateBuffer(&desc, NULL, &slice.m_buffer) );
+
+				return idx;
+			}
+
+			// More distinct values in one frame than the ring can hold. Something has to alias,
+			// and for whatever aliases the cross pane leak the ring exists to stop is back.
+			BX_WARN(false
+				, "Native constant buffer b%d took more than %d distinct values in one frame."
+				, _cbuffer.m_slot
+				, kMaxNativeConstantBufferSlices
+				);
+			return 0;
+		}
+
+		/// Octarine: uploads into one slice and records what it now holds.
+		void writeNativeConstantBufferSlice(NativeConstantBuffer& _cbuffer, uint8_t _slice
+			, const void* _data, uint32_t _writable)
+		{
+			NativeConstantBufferSlice& slice = _cbuffer.m_slices[_slice];
+			const uint32_t byteWidth = (_cbuffer.m_size + 0xf) & ~0xf;
+
+			if (NULL == slice.m_mirror)
+			{
+				slice.m_mirror = (uint8_t*)bx::alloc(g_allocator, byteWidth);
+			}
+
+			// the mirror doubles as the staging copy, so a short write's zero padding costs no
+			// extra allocation and the upload always covers the whole buffer
+			bx::memCopy(slice.m_mirror, _data, _writable);
+			bx::memSet(slice.m_mirror + _writable, 0, byteWidth - _writable);
+			slice.m_mirrorSize = _writable;
+
+			m_deviceCtx->UpdateSubresource(slice.m_buffer, 0, NULL, slice.m_mirror, 0, 0);
+		}
+
+		/// Octarine: stages bytes for one of a native program's constant buffers, and returns the
+		/// set counter every draw recorded from here on must carry.
+		///
+		/// The write cannot simply go into the shader's one ID3D11Buffer. UpdateSubresource runs
+		/// now, at record time, while every draw of the frame executes later inside submit, so one
+		/// buffer means the frame's last writer shades all of them - which is precisely what the
+		/// client's several preview panes, each its own CRenderScene feeding its own view blocks,
+		/// produce. Each distinct value instead claims its own slice and advances the counter, and
+		/// the draw carries that counter so bind time can find the slice again.
+		///
+		/// Slices are keyed by content rather than by draw: a 57,600 byte block per draw would be
+		/// absurd, and repeating a value - the same pane again next frame, or a pane drawn twice
+		/// within one frame - has to be free. A frame that feeds a single value therefore uploads
+		/// nothing after the first and allocates nothing beyond the buffer that already existed.
+		uint32_t updateNativeConstantBuffer(ProgramHandle _handle, bool _fragment, uint8_t _slot
+			, const void* _data, uint32_t _size) override
+		{
+			const ProgramD3D11& program = m_program[_handle.idx];
+			ShaderD3D11* shader = const_cast<ShaderD3D11*>(_fragment ? program.m_fsh : program.m_vsh);
+			if (NULL == shader || !shader->m_native)
+			{
+				return m_nativeCBufferSet;
+			}
+
+			for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
+			{
+				NativeConstantBuffer& cbuffer = shader->m_nativeCBuffers[ii];
+				if (cbuffer.m_slot != _slot)
+				{
+					continue;
+				}
+
+				// once a buffer is fed from outside, the stage scratch must never be committed over
+				// it: the scratch holds whatever the uniform path last wrote, which for a replayed
+				// draw is nothing at all
+				cbuffer.m_scratchOffset = UINT32_MAX;
+
+				// The write is always made exactly the size of the buffer. The caller's data can
+				// be larger - the pack sizes a buffer from the shader's used extent while the game
+				// binds the whole thing - and UpdateSubresource with a mismatched source is not
+				// something to rely on. A short write is zero padded; the shader reads zero past
+				// the end either way.
+				const uint32_t writable = bx::min<uint32_t>(_size, cbuffer.m_size);
+
+				if (cbuffer.m_ringFrame != m_nativeCBufferFrame)
+				{
+					resetNativeConstantBufferRing(cbuffer);
+				}
+
+				// Already staged? The one value frame, which is every frame the client is not
+				// showing several panes, stops here having done a single memcmp - no upload, no
+				// allocation and no new slice, as cheap as the single buffer version was.
+				if (0 != cbuffer.m_numUses)
+				{
+					const NativeConstantBufferSlice& staged =
+						cbuffer.m_slices[cbuffer.m_uses[cbuffer.m_numUses-1].m_slice];
+
+					if (NULL != staged.m_mirror
+					&&  writable == staged.m_mirrorSize
+					&&  0 == bx::memCmp(staged.m_mirror, _data, writable) )
+					{
+						return m_nativeCBufferSet;
+					}
+				}
+
+				uint8_t slice = UINT8_MAX;
+
+				// A slice that already holds these bytes, whether from earlier in this frame or
+				// from a previous one, is taken as is. That is what makes a pane free to revisit:
+				// two panes alternating settle onto two slices and stop uploading altogether.
+				for (uint8_t jj = 0; jj < cbuffer.m_numSlices; ++jj)
+				{
+					const NativeConstantBufferSlice& candidate = cbuffer.m_slices[jj];
+
+					if (NULL != candidate.m_mirror
+					&&  writable == candidate.m_mirrorSize
+					&&  0 == bx::memCmp(candidate.m_mirror, _data, writable) )
+					{
+						slice = jj;
+						break;
+					}
+				}
+
+				if (UINT8_MAX == slice)
+				{
+					slice = claimNativeConstantBufferSlice(cbuffer);
+					writeNativeConstantBufferSlice(cbuffer, slice, _data, writable);
+				}
+
+				// claimed for the rest of the frame, whichever way it was found
+				cbuffer.m_slices[slice].m_frame = m_nativeCBufferFrame;
+				cbuffer.m_lastSlice = slice;
+				cbuffer.m_haveLast  = true;
+
+				// draws already recorded keep the slice they were recorded against; everything
+				// submitted from here belongs to this one
+				++m_nativeCBufferSet;
+
+				if (cbuffer.m_numUses < kMaxNativeConstantBufferUses)
+				{
+					++cbuffer.m_numUses;
+				}
+
+				NativeConstantBufferUse& use = cbuffer.m_uses[cbuffer.m_numUses-1];
+				use.m_set   = m_nativeCBufferSet;
+				use.m_slice = slice;
+
+				return m_nativeCBufferSet;
+			}
+
+			return m_nativeCBufferSet;
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 		void destroyProgram(ProgramHandle _handle) override
 		{
 			m_program[_handle.idx].destroy();
@@ -2346,11 +2548,18 @@ namespace bgfx { namespace d3d11
 		{
 			const uint32_t maxComputeBindings = g_caps.limits.maxComputeBindings;
 			const uint32_t maxTextureSamplers = g_caps.limits.maxTextureSamplers;
+			// D3D11 takes 128 shader resource views per stage but only sixteen samplers, so the
+			// two counts stop being the same number once the srv limit is raised for native
+			// shaders. Binding more than sixteen samplers is rejected outright.
+			const uint32_t maxSamplers = bx::min<uint32_t>(maxTextureSamplers
+				, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT);
+			const uint32_t maxUavs = bx::min<uint32_t>(maxTextureSamplers, 8);
+			BX_UNUSED(maxSamplers, maxUavs);
 
 			m_deviceCtx->CSSetShader(NULL, NULL, 0);
 			m_deviceCtx->CSSetUnorderedAccessViews(0, maxComputeBindings, s_zero.m_uav, NULL);
 			m_deviceCtx->CSSetShaderResources(0, maxTextureSamplers, s_zero.m_srv);
-			m_deviceCtx->CSSetSamplers(0, maxTextureSamplers, s_zero.m_sampler);
+			m_deviceCtx->CSSetSamplers(0, maxSamplers, s_zero.m_sampler);
 		}
 
 		void updateMsaa(DXGI_FORMAT _format) const
@@ -2555,8 +2764,122 @@ namespace bgfx { namespace d3d11
 			setShaderUniform(_flags, _regIndex, _val, _numRegs);
 		}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		void bindNativeResources(const ShaderD3D11* _shader, bool _fragment)
+		{
+			for (uint8_t ii = 0; ii < _shader->m_numNativeSrvs; ++ii)
+			{
+				const NativeResourceSlot& res = _shader->m_nativeSrvs[ii];
+				ID3D11ShaderResourceView* srv = m_textureStage.m_srv[res.m_bindStage];
+
+				if (_fragment)
+				{
+					m_deviceCtx->PSSetShaderResources(res.m_slot, 1, &srv);
+				}
+				else
+				{
+					m_deviceCtx->VSSetShaderResources(res.m_slot, 1, &srv);
+				}
+			}
+
+			for (uint8_t ii = 0; ii < _shader->m_numNativeSamplers; ++ii)
+			{
+				const NativeResourceSlot& res = _shader->m_nativeSamplers[ii];
+				ID3D11SamplerState* sampler = m_textureStage.m_sampler[res.m_bindStage];
+
+				if (_fragment)
+				{
+					m_deviceCtx->PSSetSamplers(res.m_slot, 1, &sampler);
+				}
+				else
+				{
+					m_deviceCtx->VSSetSamplers(res.m_slot, 1, &sampler);
+				}
+			}
+		}
+
+		/// Octarine: binds each of a native shader's constant buffers for one draw. _set is the
+		/// counter the draw recorded, so an externally fed buffer resolves to the slice that was
+		/// staged at that moment rather than to whatever the last pane of the frame wrote.
+		void bindNativeConstantBuffers(const ShaderD3D11* _shader, bool _fragment, uint32_t _set)
+		{
+			for (uint8_t ii = 0; ii < _shader->m_numNativeCBuffers; ++ii)
+			{
+				const NativeConstantBuffer& cbuffer = _shader->m_nativeCBuffers[ii];
+
+				// a buffer on the uniform path never stages anything, and neither does one nothing
+				// has fed this frame, so both keep the plain buffer
+				ID3D11Buffer* buffer = cbuffer.m_buffer;
+
+				if (cbuffer.m_ringFrame == m_nativeCBufferFrame)
+				{
+					// the last slice staged at or before this draw was recorded. The list is short -
+					// one entry per distinct value the frame fed, so one in the ordinary case.
+					for (uint8_t jj = cbuffer.m_numUses; 0 != jj; --jj)
+					{
+						const NativeConstantBufferUse& use = cbuffer.m_uses[jj-1];
+
+						if (use.m_set <= _set)
+						{
+							buffer = cbuffer.m_slices[use.m_slice].m_buffer;
+							break;
+						}
+					}
+				}
+
+				if (_fragment)
+				{
+					m_deviceCtx->PSSetConstantBuffers(cbuffer.m_slot, 1, &buffer);
+				}
+				else
+				{
+					m_deviceCtx->VSSetConstantBuffers(cbuffer.m_slot, 1, &buffer);
+				}
+			}
+		}
+
+		void commitNativeConstants(const ShaderD3D11* _shader, const uint8_t* _scratch)
+		{
+			for (uint8_t ii = 0; ii < _shader->m_numNativeCBuffers; ++ii)
+			{
+				const NativeConstantBuffer& cbuffer = _shader->m_nativeCBuffers[ii];
+				if (UINT32_MAX == cbuffer.m_scratchOffset)
+				{
+					continue;
+				}
+
+				m_deviceCtx->UpdateSubresource(cbuffer.m_buffer, 0, 0, _scratch + cbuffer.m_scratchOffset, 0, 0);
+			}
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 		void commitShaderConstants()
 		{
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native shader has one constant buffer per b register rather than bgfx's
+			// single slot-0 buffer, so the stage scratch is scattered instead of copied whole.
+			if (m_currentProgram->m_vsh->m_native)
+			{
+				if (0 < m_vsChanges)
+				{
+					commitNativeConstants(m_currentProgram->m_vsh, m_vsScratch);
+					m_vsChanges = 0;
+				}
+
+				if (0 < m_fsChanges)
+				{
+					if (NULL != m_currentProgram->m_fsh)
+					{
+						commitNativeConstants(m_currentProgram->m_fsh, m_fsScratch);
+					}
+
+					m_fsChanges = 0;
+				}
+
+				return;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 			if (0 < m_vsChanges)
 			{
 				if (NULL != m_currentProgram->m_vsh->m_buffer)
@@ -2672,6 +2995,53 @@ namespace bgfx { namespace d3d11
 			uint64_t layoutHash = (uint64_t(_program.m_vsh->m_hash)<<32) | murmur.end();
 
 			ID3D11InputLayout* inputLayout = m_inputLayoutCache.find(layoutHash);
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native shader carries its own input elements, because bgfx's Attrib set
+			// stops at TEXCOORD7 and its AttribType set has no raw uint - both of which a shipped
+			// Source 2 vertex format uses. The caller supplies a layout only for its stride.
+			if (_program.m_vsh->m_native)
+			{
+				if (NULL == inputLayout)
+				{
+					D3D11_INPUT_ELEMENT_DESC elements[kMaxNativeVertexAttribs];
+					const uint8_t num = _program.m_vsh->m_numNativeAttribs;
+
+					for (uint8_t ii = 0; ii < num; ++ii)
+					{
+						const NativeVertexAttrib& attrib = _program.m_vsh->m_nativeAttribs[ii];
+						D3D11_INPUT_ELEMENT_DESC& elem = elements[ii];
+
+						elem.SemanticName         = attrib.m_semantic;
+						elem.SemanticIndex        = attrib.m_semanticIdx;
+						elem.Format               = DXGI_FORMAT(attrib.m_format);
+						elem.InputSlot            = attrib.m_stream;
+						elem.AlignedByteOffset    = attrib.m_offset;
+						elem.InputSlotClass       = 0 != attrib.m_instanced
+							? D3D11_INPUT_PER_INSTANCE_DATA
+							: D3D11_INPUT_PER_VERTEX_DATA
+							;
+						elem.InstanceDataStepRate = 0 != attrib.m_instanced ? 1 : 0;
+					}
+
+					const HRESULT hr = m_device->CreateInputLayout(elements
+						, num
+						, _program.m_vsh->m_code->data
+						, _program.m_vsh->m_code->size
+						, &inputLayout
+						);
+					if (FAILED(hr) )
+					{
+						bx::debugPrintf("bgfx: native input layout creation failed, hr 0x%08x\n", hr);
+					}
+
+					m_inputLayoutCache.add(layoutHash, inputLayout);
+				}
+
+				m_deviceCtx->IASetInputLayout(inputLayout);
+				return;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 			if (NULL == inputLayout)
 			{
 				D3D11_INPUT_ELEMENT_DESC vertexElements[Attrib::Count+1+BGFX_CONFIG_MAX_INSTANCE_DATA_COUNT];
@@ -3048,7 +3418,10 @@ namespace bgfx { namespace d3d11
 				sd.AddressV       = s_textureAddress[(_flags&BGFX_SAMPLER_V_MASK)>>BGFX_SAMPLER_V_SHIFT];
 				sd.AddressW       = s_textureAddress[(_flags&BGFX_SAMPLER_W_MASK)>>BGFX_SAMPLER_W_SHIFT];
 				sd.MipLODBias     = float(BGFX_CONFIG_MIP_LOD_BIAS);
-				sd.MaxAnisotropy  = m_maxAnisotropy;
+				// a sampler that names its own anisotropy wins over the global value, so one draw
+				// can mix the 8x and 4x samplers a shipped shader binds side by side
+				const uint32_t aniso = (_flags&BGFX_SAMPLER_OCT_ANISOTROPY_MASK)>>BGFX_SAMPLER_OCT_ANISOTROPY_SHIFT;
+				sd.MaxAnisotropy  = 0 == aniso ? m_maxAnisotropy : UINT32_C(1)<<aniso;
 				sd.ComparisonFunc = 0 == cmpFunc ? D3D11_COMPARISON_NEVER : s_cmpFunc[cmpFunc];
 				sd.BorderColor[0] = _rgba[0];
 				sd.BorderColor[1] = _rgba[1];
@@ -3075,6 +3448,13 @@ namespace bgfx { namespace d3d11
 		void quietValidation()
 		{
 			const uint32_t maxTextureSamplers = g_caps.limits.maxTextureSamplers;
+			// D3D11 takes 128 shader resource views per stage but only sixteen samplers, so the
+			// two counts stop being the same number once the srv limit is raised for native
+			// shaders. Binding more than sixteen samplers is rejected outright.
+			const uint32_t maxSamplers = bx::min<uint32_t>(maxTextureSamplers
+				, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT);
+			const uint32_t maxUavs = bx::min<uint32_t>(maxTextureSamplers, 8);
+			BX_UNUSED(maxSamplers, maxUavs);
 
 			ID3D11DeviceContext* deviceCtx = m_deviceCtx;
 
@@ -3082,7 +3462,7 @@ namespace bgfx { namespace d3d11
 			if (m_featureLevel > D3D_FEATURE_LEVEL_9_3)
 			{
 				deviceCtx->VSSetShaderResources(0, maxTextureSamplers, s_zero.m_srv);
-				deviceCtx->VSSetSamplers(0, maxTextureSamplers, s_zero.m_sampler);
+				deviceCtx->VSSetSamplers(0, maxSamplers, s_zero.m_sampler);
 			}
 
 			if (m_featureLevel > D3D_FEATURE_LEVEL_11_0)
@@ -3092,14 +3472,14 @@ namespace bgfx { namespace d3d11
 					, NULL
 					, NULL
 					, 16
-					, maxTextureSamplers
+					, maxUavs
 					, s_zero.m_uav
 					, NULL
 					);
 			}
 
 			deviceCtx->PSSetShaderResources(0, maxTextureSamplers, s_zero.m_srv);
-			deviceCtx->PSSetSamplers(0, maxTextureSamplers, s_zero.m_sampler);
+			deviceCtx->PSSetSamplers(0, maxSamplers, s_zero.m_sampler);
 		}
 
 		void commitTextureStage()
@@ -3110,6 +3490,31 @@ namespace bgfx { namespace d3d11
 			}
 
 			const uint32_t maxTextureSamplers = g_caps.limits.maxTextureSamplers;
+			// D3D11 takes 128 shader resource views per stage but only sixteen samplers, so the
+			// two counts stop being the same number once the srv limit is raised for native
+			// shaders. Binding more than sixteen samplers is rejected outright.
+			const uint32_t maxSamplers = bx::min<uint32_t>(maxTextureSamplers
+				, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT);
+			const uint32_t maxUavs = bx::min<uint32_t>(maxTextureSamplers, 8);
+			BX_UNUSED(maxSamplers, maxUavs);
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native shader binds each resource at the register its own bytecode declares,
+			// per stage, rather than at the bind stage index. Nothing else reaches this branch.
+			if (NULL != m_currentProgram
+			&&  NULL != m_currentProgram->m_vsh
+			&&  m_currentProgram->m_vsh->m_native)
+			{
+				bindNativeResources(m_currentProgram->m_vsh, false);
+
+				if (NULL != m_currentProgram->m_fsh)
+				{
+					bindNativeResources(m_currentProgram->m_fsh, true);
+				}
+
+				return;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 			ID3D11DeviceContext* deviceCtx = m_deviceCtx;
 
@@ -3117,7 +3522,7 @@ namespace bgfx { namespace d3d11
 			if (m_featureLevel > D3D_FEATURE_LEVEL_9_3)
 			{
 				deviceCtx->VSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-				deviceCtx->VSSetSamplers(0, maxTextureSamplers, m_textureStage.m_sampler);
+				deviceCtx->VSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
 			}
 
 			if (m_featureLevel > D3D_FEATURE_LEVEL_11_0)
@@ -3127,14 +3532,14 @@ namespace bgfx { namespace d3d11
 					, NULL
 					, NULL
 					, 16
-					, maxTextureSamplers
+					, maxUavs
 					, m_textureStage.m_uav
 					, NULL
 					);
 			}
 
 			deviceCtx->PSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-			deviceCtx->PSSetSamplers(0, maxTextureSamplers, m_textureStage.m_sampler);
+			deviceCtx->PSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
 		}
 
 		void invalidateTextureStage()
@@ -3668,6 +4073,20 @@ namespace bgfx { namespace d3d11
 
 		ProgramD3D11* m_currentProgram;
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: which frame the constant buffer rings' per frame state belongs to. Stale
+		/// state means nothing has been staged yet, so a bind falls back to the plain buffer.
+		/// Bumped once submit has consumed a frame, never reset, so record and submit of the same
+		/// frame always agree.
+		uint32_t m_nativeCBufferFrame = 1;
+
+		/// Octarine: monotonic counter of external constant buffer writes. It is stamped onto
+		/// every draw as it is recorded and onto every slice as it is staged, and the two are
+		/// matched up at submit. Monotonic rather than per frame so the copy bgfx keeps on the
+		/// recording side never has to be reset in step with this one.
+		uint32_t m_nativeCBufferSet = 0;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 		uint8_t m_vsScratch[64<<10];
 		uint8_t m_fsScratch[64<<10];
 		uint32_t m_vsChanges;
@@ -3784,20 +4203,32 @@ namespace bgfx { namespace d3d11
 
 		const bool needUav = 0 != (_flags & (BGFX_BUFFER_COMPUTE_WRITE|BGFX_BUFFER_DRAW_INDIRECT) );
 		const bool needSrv = 0 != (_flags & BGFX_BUFFER_COMPUTE_READ);
+		// Octarine: a shipped Source 2 shader reads StructuredBuffer<T> with its own stride - 48 for
+		// TransformData_t, 32 for the packed instance data - which a typed R32G32B32A32 view cannot
+		// describe. The stride is the caller's, so nothing else changes shape.
+		const bool structured = 0 != (_flags & BGFX_BUFFER_STRUCTURED) && 0 != _stride;
+		// a ByteAddressBuffer: the shader declares dcl_resource_raw and indexes it in bytes,
+		// which a structured view cannot serve - it reads back zero
+		const bool rawBuffer = 0 != (_flags & BGFX_BUFFER_RAW);
 		const bool drawIndirect = 0 != (_flags & BGFX_BUFFER_DRAW_INDIRECT);
 		m_dynamic = NULL == _data && !needUav;
 
 		D3D11_BUFFER_DESC desc;
 		desc.ByteWidth = _size;
+		// a structured buffer cannot also be a vertex or index buffer: D3D11 rejects the
+		// combination outright, and DX_CHECK is silent in a release build, so the failure
+		// shows up only as a null srv much later
 		desc.BindFlags = 0
-			| (_vertex ? D3D11_BIND_VERTEX_BUFFER    : D3D11_BIND_INDEX_BUFFER)
+			| ( (structured || rawBuffer) ? 0 : (_vertex ? D3D11_BIND_VERTEX_BUFFER : D3D11_BIND_INDEX_BUFFER) )
 			| (needUav ? D3D11_BIND_UNORDERED_ACCESS : 0)
 			| (needSrv ? D3D11_BIND_SHADER_RESOURCE  : 0)
 			;
 		desc.MiscFlags = 0
 			| (drawIndirect ? D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS : 0)
 			;
-		desc.StructureByteStride = 0;
+		desc.MiscFlags |= structured ? D3D11_RESOURCE_MISC_BUFFER_STRUCTURED : 0;
+		desc.MiscFlags |= rawBuffer ? D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS : 0;
+		desc.StructureByteStride = structured ? _stride : 0;
 
 		DXGI_FORMAT format;
 		uint32_t    stride;
@@ -3911,10 +4342,22 @@ namespace bgfx { namespace d3d11
 		if (needSrv)
 		{
 			D3D11_SHADER_RESOURCE_VIEW_DESC srvd;
-			srvd.Format = format;
-			srvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-			srvd.Buffer.FirstElement = 0;
-			srvd.Buffer.NumElements = m_size / stride;
+			bx::memSet(&srvd, 0, sizeof(srvd) );
+			if (rawBuffer)
+			{
+				srvd.Format = DXGI_FORMAT_R32_TYPELESS;
+				srvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+				srvd.BufferEx.FirstElement = 0;
+				srvd.BufferEx.NumElements = m_size / 4;
+				srvd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+			}
+			else
+			{
+				srvd.Format = structured ? DXGI_FORMAT_UNKNOWN : format;
+				srvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+				srvd.Buffer.FirstElement = 0;
+				srvd.Buffer.NumElements = m_size / (structured ? _stride : stride);
+			}
 			DX_CHECK(device->CreateShaderResourceView(m_ptr
 				, &srvd
 				, &m_srv
@@ -4263,7 +4706,13 @@ namespace bgfx { namespace d3d11
 
 		const Memory* temp = NULL;
 
-		if (!isShaderType(magic, 'C'))
+		// Octarine: a shipped shader goes to D3D11 exactly as Valve compiled it. The rewrite below
+		// exists to fix up bgfx's own UAV registers, and re-serializing someone else's DXBC through
+		// bgfx's writer risks losing chunks that writer does not model.
+		const bool nativeShader = (0 != BGFX_CONFIG_OCT_NATIVE_SHADERS) && isShaderNative(magic);
+
+		if (!isShaderType(magic, 'C')
+		&&  !nativeShader)
 		{
 			bx::MemoryReader rd(code, shaderSize);
 
@@ -4341,6 +4790,127 @@ namespace bgfx { namespace d3d11
 
 			BX_TRACE("\tCB size: %d", desc.ByteWidth);
 		}
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		if (nativeShader)
+		{
+			m_native = true;
+
+			uint32_t tag = 0;
+			bx::read(&reader, tag, bx::ErrorAssert{});
+			BGFX_FATAL(BGFX_SHADER_NATIVE_TAG == tag, bgfx::Fatal::InvalidShader
+				, "Native shader is missing its binding table.");
+
+			uint8_t numNative = 0;
+			bx::read(&reader, numNative, bx::ErrorAssert{});
+			BGFX_FATAL(numNative <= kMaxNativeVertexAttribs, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d vertex attributes, %d is the maximum."
+				, numNative, kMaxNativeVertexAttribs);
+
+			for (uint8_t ii = 0; ii < numNative; ++ii)
+			{
+				NativeVertexAttrib& attrib = m_nativeAttribs[ii];
+				bx::memSet(&attrib, 0, sizeof(attrib) );
+
+				uint8_t nameSize = 0;
+				bx::read(&reader, nameSize, bx::ErrorAssert{});
+				BGFX_FATAL(nameSize < BX_COUNTOF(attrib.m_semantic), bgfx::Fatal::InvalidShader
+					, "Native vertex attribute semantic is %d bytes, %d is the maximum."
+					, nameSize, int32_t(BX_COUNTOF(attrib.m_semantic) ) - 1);
+
+				bx::read(&reader, attrib.m_semantic, nameSize, bx::ErrorAssert{});
+				attrib.m_semantic[nameSize] = '\0';
+
+				bx::read(&reader, attrib.m_semanticIdx, bx::ErrorAssert{});
+				bx::read(&reader, attrib.m_format, bx::ErrorAssert{});
+				bx::read(&reader, attrib.m_stream, bx::ErrorAssert{});
+				bx::read(&reader, attrib.m_offset, bx::ErrorAssert{});
+				bx::read(&reader, attrib.m_instanced, bx::ErrorAssert{});
+			}
+
+			m_numNativeAttribs = numNative;
+
+			uint8_t numCBuffers = 0;
+			bx::read(&reader, numCBuffers, bx::ErrorAssert{});
+			BGFX_FATAL(numCBuffers <= kMaxNativeConstantBuffers, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d constant buffers, %d is the maximum."
+				, numCBuffers, kMaxNativeConstantBuffers);
+
+			for (uint8_t ii = 0; ii < numCBuffers; ++ii)
+			{
+				NativeConstantBuffer& cbuffer = m_nativeCBuffers[ii];
+				// the ring state has to start empty, and nothing below writes all of it
+				bx::memSet(&cbuffer, 0, sizeof(cbuffer) );
+
+				bx::read(&reader, cbuffer.m_slot, bx::ErrorAssert{});
+				bx::read(&reader, cbuffer.m_scratchOffset, bx::ErrorAssert{});
+				bx::read(&reader, cbuffer.m_size, bx::ErrorAssert{});
+
+				D3D11_BUFFER_DESC desc;
+				desc.ByteWidth = (cbuffer.m_size + 0xf) & ~0xf;
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.CPUAccessFlags = 0;
+				desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+				desc.MiscFlags = 0;
+				desc.StructureByteStride = 0;
+				// an external buffer is never written through the uniform path, so it is created
+				// zeroed rather than left holding whatever the allocation returned: a shipped
+				// lighting buffer full of garbage produces NaNs, not a dark image
+				if (UINT32_MAX == cbuffer.m_scratchOffset)
+				{
+					void* zeroed = bx::alloc(g_allocator, desc.ByteWidth);
+					bx::memSet(zeroed, 0, desc.ByteWidth);
+
+					D3D11_SUBRESOURCE_DATA srd;
+					srd.pSysMem = zeroed;
+					srd.SysMemPitch = 0;
+					srd.SysMemSlicePitch = 0;
+					DX_CHECK(s_renderD3D11->m_device->CreateBuffer(&desc, &srd, &cbuffer.m_buffer) );
+					bx::free(g_allocator, zeroed);
+				}
+				else
+				{
+					DX_CHECK(s_renderD3D11->m_device->CreateBuffer(&desc, NULL, &cbuffer.m_buffer) );
+				}
+
+				// slice zero is the buffer just made, so a buffer nothing ever feeds from outside
+				// costs the ring exactly nothing
+				cbuffer.m_slices[0].m_buffer = cbuffer.m_buffer;
+				cbuffer.m_numSlices = 1;
+			}
+
+			m_numNativeCBuffers = numCBuffers;
+
+			uint8_t numSrvs = 0;
+			bx::read(&reader, numSrvs, bx::ErrorAssert{});
+			BGFX_FATAL(numSrvs <= BGFX_CONFIG_MAX_TEXTURE_SAMPLERS, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d srv bindings, %d is the maximum."
+				, numSrvs, BGFX_CONFIG_MAX_TEXTURE_SAMPLERS);
+
+			for (uint8_t ii = 0; ii < numSrvs; ++ii)
+			{
+				bx::read(&reader, m_nativeSrvs[ii].m_bindStage, bx::ErrorAssert{});
+				bx::read(&reader, m_nativeSrvs[ii].m_slot, bx::ErrorAssert{});
+			}
+
+			uint8_t numSamplers = 0;
+			bx::read(&reader, numSamplers, bx::ErrorAssert{});
+			BGFX_FATAL(numSamplers <= BGFX_CONFIG_MAX_TEXTURE_SAMPLERS, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d sampler bindings, %d is the maximum."
+				, numSamplers, BGFX_CONFIG_MAX_TEXTURE_SAMPLERS);
+
+			for (uint8_t ii = 0; ii < numSamplers; ++ii)
+			{
+				bx::read(&reader, m_nativeSamplers[ii].m_bindStage, bx::ErrorAssert{});
+				bx::read(&reader, m_nativeSamplers[ii].m_slot, bx::ErrorAssert{});
+			}
+
+			m_numNativeSrvs = numSrvs;
+			m_numNativeSamplers = numSamplers;
+
+			BX_TRACE("\tnative shader, %d vertex attributes", numNative);
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		if (NULL != temp)
 		{
@@ -4496,7 +5066,8 @@ namespace bgfx { namespace d3d11
 							bimg::imageDecodeToBgra8(g_allocator, temp, mip.m_data, mip.m_width, mip.m_height, srcpitch, mip.m_format);
 
 							srd[kk].pSysMem = temp;
-							srd[kk].SysMemPitch = srcpitch;
+							srd[kk].SysMemPitch      = srcpitch;
+							srd[kk].SysMemSlicePitch = mip.m_height*srcpitch;
 						}
 						else if (compressed)
 						{
@@ -4505,7 +5076,8 @@ namespace bgfx { namespace d3d11
 						}
 						else
 						{
-							srd[kk].SysMemPitch = mip.m_width*mip.m_bpp/8;
+							srd[kk].SysMemPitch      = mip.m_width*mip.m_bpp/8;
+							srd[kk].SysMemSlicePitch = mip.m_height*srd[kk].SysMemPitch;
 
 							switch (m_textureFormat)
 							{
@@ -4527,7 +5099,6 @@ namespace bgfx { namespace d3d11
 							}
 						}
 
-						srd[kk].SysMemSlicePitch = mip.m_height*srd[kk].SysMemPitch;
 						++kk;
 					}
 				}
@@ -5727,6 +6298,13 @@ namespace bgfx { namespace d3d11
 
 		const uint32_t maxComputeBindings = g_caps.limits.maxComputeBindings;
 		const uint32_t maxTextureSamplers = g_caps.limits.maxTextureSamplers;
+			// D3D11 takes 128 shader resource views per stage but only sixteen samplers, so the
+			// two counts stop being the same number once the srv limit is raised for native
+			// shaders. Binding more than sixteen samplers is rejected outright.
+			const uint32_t maxSamplers = bx::min<uint32_t>(maxTextureSamplers
+				, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT);
+			const uint32_t maxUavs = bx::min<uint32_t>(maxTextureSamplers, 8);
+			BX_UNUSED(maxSamplers, maxUavs);
 
 		uint32_t statsNumPrimsSubmitted[BX_COUNTOF(s_primInfo)] = {};
 		uint32_t statsNumPrimsRendered[BX_COUNTOF(s_primInfo)] = {};
@@ -5802,8 +6380,8 @@ namespace bgfx { namespace d3d11
 					vp.TopLeftY = viewState.m_rect.m_y;
 					vp.Width    = viewState.m_rect.m_width;
 					vp.Height   = viewState.m_rect.m_height;
-					vp.MinDepth = 0.0f;
-					vp.MaxDepth = 1.0f;
+					vp.MinDepth = _render->m_view[view].m_depthMin;
+					vp.MaxDepth = _render->m_view[view].m_depthMax;
 					deviceCtx->RSSetViewports(1, &vp);
 					Clear& clr = _render->m_view[view].m_clear;
 
@@ -5832,8 +6410,8 @@ namespace bgfx { namespace d3d11
 						deviceCtx->VSSetShaderResources(0, maxTextureSamplers, s_zero.m_srv);
 						deviceCtx->PSSetShaderResources(0, maxTextureSamplers, s_zero.m_srv);
 
-						deviceCtx->VSSetSamplers(0, maxTextureSamplers, s_zero.m_sampler);
-						deviceCtx->PSSetSamplers(0, maxTextureSamplers, s_zero.m_sampler);
+						deviceCtx->VSSetSamplers(0, maxSamplers, s_zero.m_sampler);
+						deviceCtx->PSSetSamplers(0, maxSamplers, s_zero.m_sampler);
 					}
 
 					const RenderCompute& compute = renderItem.compute;
@@ -5947,7 +6525,7 @@ namespace bgfx { namespace d3d11
 
 					deviceCtx->CSSetUnorderedAccessViews(0, maxComputeBindings, uav, NULL);
 					deviceCtx->CSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-					deviceCtx->CSSetSamplers(0, maxTextureSamplers, m_textureStage.m_sampler);
+					deviceCtx->CSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
 
 					if (isValid(compute.m_indirectBuffer) )
 					{
@@ -6151,14 +6729,32 @@ namespace bgfx { namespace d3d11
 
 						const ShaderD3D11* vsh = program.m_vsh;
 						deviceCtx->VSSetShader(vsh->m_vertexShader, NULL, 0);
-						deviceCtx->VSSetConstantBuffers(0, 1, &vsh->m_buffer);
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+						if (vsh->m_native)
+						{
+							bindNativeConstantBuffers(vsh, false, draw.m_nativeCBufferSet);
+						}
+						else
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+						{
+							deviceCtx->VSSetConstantBuffers(0, 1, &vsh->m_buffer);
+						}
 
 						const ShaderD3D11* fsh = program.m_fsh;
 						if (NULL != fsh
 						&& (NULL != m_currentColor || fsh->m_hasDepthOp) )
 						{
 							deviceCtx->PSSetShader(fsh->m_pixelShader, NULL, 0);
-							deviceCtx->PSSetConstantBuffers(0, 1, &fsh->m_buffer);
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+							if (fsh->m_native)
+							{
+								bindNativeConstantBuffers(fsh, true, draw.m_nativeCBufferSet);
+							}
+							else
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+							{
+								deviceCtx->PSSetConstantBuffers(0, 1, &fsh->m_buffer);
+							}
 						}
 						else
 						{
@@ -6394,6 +6990,26 @@ namespace bgfx { namespace d3d11
 					uint32_t numInstances      = 0;
 					uint32_t numPrimsRendered  = 0;
 					uint32_t numDrawIndirect   = 0;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+					// Octarine: a native program owns several constant buffer and resource registers, and
+					// bgfx only rebinds slot 0 when the program changes. Anything between two draws that
+					// touches those registers - the clear quad does - would otherwise survive into this
+					// draw, so they are rebound here, per draw, while the program is known.
+					if (NULL != m_currentProgram
+					&&  NULL != m_currentProgram->m_vsh
+					&&  m_currentProgram->m_vsh->m_native)
+					{
+						bindNativeConstantBuffers(m_currentProgram->m_vsh, false, draw.m_nativeCBufferSet);
+						bindNativeResources(m_currentProgram->m_vsh, false);
+
+						if (NULL != m_currentProgram->m_fsh)
+						{
+							bindNativeConstantBuffers(m_currentProgram->m_fsh, true, draw.m_nativeCBufferSet);
+							bindNativeResources(m_currentProgram->m_fsh, true);
+						}
+					}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 					if (hasOcclusionQuery)
 					{
@@ -6755,6 +7371,13 @@ namespace bgfx { namespace d3d11
 			deviceCtx->ResolveSubresource(backBufferColor, 0, m_msaaRt, 0, m_scd.format);
 			DX_RELEASE(backBufferColor, 0);
 		}
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		// Every draw of this frame has executed, so the slices it staged are free again. The bump
+		// happens here rather than as the next frame begins recording because in a single threaded
+		// bgfx the two are the same moment, and this end of it is the one that is certain.
+		++m_nativeCBufferFrame;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 	}
 } /* namespace d3d11 */ } // namespace bgfx
 

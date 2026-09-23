@@ -8,6 +8,7 @@
 #if BGFX_CONFIG_RENDERER_VULKAN
 #	include <bx/pixelformat.h>
 #	include "renderer_vk.h"
+#	include <stdio.h>
 #	include "shader_spirv.h"
 
 #if BX_PLATFORM_OSX
@@ -173,6 +174,7 @@ VK_IMPORT_DEVICE
 		{ VK_FORMAT_BC4_UNORM_BLOCK,           VK_FORMAT_BC4_UNORM_BLOCK,          VK_FORMAT_UNDEFINED,           VK_FORMAT_UNDEFINED,                { $_, $_, $_, $_ } }, // BC4
 		{ VK_FORMAT_BC5_UNORM_BLOCK,           VK_FORMAT_BC5_UNORM_BLOCK,          VK_FORMAT_UNDEFINED,           VK_FORMAT_UNDEFINED,                { $_, $_, $_, $_ } }, // BC5
 		{ VK_FORMAT_BC6H_SFLOAT_BLOCK,         VK_FORMAT_BC6H_SFLOAT_BLOCK,        VK_FORMAT_UNDEFINED,           VK_FORMAT_UNDEFINED,                { $_, $_, $_, $_ } }, // BC6H
+		{ VK_FORMAT_BC6H_UFLOAT_BLOCK,         VK_FORMAT_BC6H_UFLOAT_BLOCK,        VK_FORMAT_UNDEFINED,           VK_FORMAT_UNDEFINED,                { $_, $_, $_, $_ } }, // BC6H_UF16
 		{ VK_FORMAT_BC7_UNORM_BLOCK,           VK_FORMAT_BC7_UNORM_BLOCK,          VK_FORMAT_UNDEFINED,           VK_FORMAT_BC7_SRGB_BLOCK,           { $_, $_, $_, $_ } }, // BC7
 		{ VK_FORMAT_UNDEFINED,                 VK_FORMAT_UNDEFINED,                VK_FORMAT_UNDEFINED,           VK_FORMAT_UNDEFINED,                { $_, $_, $_, $_ } }, // ETC1
 		{ VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK,   VK_FORMAT_UNDEFINED,                VK_FORMAT_UNDEFINED,           VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK,   { $_, $_, $_, $_ } }, // ETC2
@@ -329,6 +331,7 @@ VK_IMPORT_DEVICE
 			EXT_line_rasterization,
 			EXT_shader_viewport_index_layer,
 			EXT_custom_border_color,
+			EXT_robustness2,
 
 			Count
 		};
@@ -353,8 +356,83 @@ VK_IMPORT_DEVICE
 		{ "VK_EXT_line_rasterization",              1, false, false, true                                                         , Layer::Count },
 		{ "VK_EXT_shader_viewport_index_layer",     1, false, false, true                                                         , Layer::Count },
 		{ "VK_EXT_custom_border_color",             1, false, false, true                                                         , Layer::Count },
+		// Octarine: nullDescriptor, so a native shader's unbound resource reads zero as it does on D3D11
+		{ "VK_EXT_robustness2",                     1, false, false, true                                                         , Layer::Count },
 	};
 	BX_STATIC_ASSERT(Extension::Count == BX_COUNTOF(s_extension) );
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	/// Octarine: a native shader's vertex formats are the mesh's own DXGI_FORMAT values, which is
+	/// how the D3D11 flavour hands them to CreateInputLayout. These are the ones a vmesh uses.
+	static VkFormat nativeFormatVK(uint32_t _dxgi)
+	{
+		switch (_dxgi)
+		{
+		case  2: return VK_FORMAT_R32G32B32A32_SFLOAT;
+		case  3: return VK_FORMAT_R32G32B32A32_UINT;
+		case  4: return VK_FORMAT_R32G32B32A32_SINT;
+		case  6: return VK_FORMAT_R32G32B32_SFLOAT;
+		case  7: return VK_FORMAT_R32G32B32_UINT;
+		case  8: return VK_FORMAT_R32G32B32_SINT;
+		case 10: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case 11: return VK_FORMAT_R16G16B16A16_UNORM;
+		case 12: return VK_FORMAT_R16G16B16A16_UINT;
+		case 13: return VK_FORMAT_R16G16B16A16_SNORM;
+		case 14: return VK_FORMAT_R16G16B16A16_SINT;
+		case 16: return VK_FORMAT_R32G32_SFLOAT;
+		case 17: return VK_FORMAT_R32G32_UINT;
+		case 18: return VK_FORMAT_R32G32_SINT;
+		case 24: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+		case 25: return VK_FORMAT_A2B10G10R10_UINT_PACK32;
+		case 28: return VK_FORMAT_R8G8B8A8_UNORM;
+		case 30: return VK_FORMAT_R8G8B8A8_UINT;
+		case 31: return VK_FORMAT_R8G8B8A8_SNORM;
+		case 32: return VK_FORMAT_R8G8B8A8_SINT;
+		case 34: return VK_FORMAT_R16G16_SFLOAT;
+		case 35: return VK_FORMAT_R16G16_UNORM;
+		case 36: return VK_FORMAT_R16G16_UINT;
+		case 37: return VK_FORMAT_R16G16_SNORM;
+		case 38: return VK_FORMAT_R16G16_SINT;
+		case 41: return VK_FORMAT_R32_SFLOAT;
+		case 42: return VK_FORMAT_R32_UINT;
+		case 43: return VK_FORMAT_R32_SINT;
+		case 49: return VK_FORMAT_R8G8_UNORM;
+		case 50: return VK_FORMAT_R8G8_UINT;
+		case 51: return VK_FORMAT_R8G8_SNORM;
+		case 52: return VK_FORMAT_R8G8_SINT;
+		case 54: return VK_FORMAT_R16_SFLOAT;
+		case 56: return VK_FORMAT_R16_UNORM;
+		case 57: return VK_FORMAT_R16_UINT;
+		case 58: return VK_FORMAT_R16_SNORM;
+		case 59: return VK_FORMAT_R16_SINT;
+		case 61: return VK_FORMAT_R8_UNORM;
+		case 62: return VK_FORMAT_R8_UINT;
+		case 63: return VK_FORMAT_R8_SNORM;
+		case 64: return VK_FORMAT_R8_SINT;
+		case 87: return VK_FORMAT_B8G8R8A8_UNORM;
+		default:
+			BX_TRACE("native vertex format DXGI %u has no Vulkan mapping", _dxgi);
+			return VK_FORMAT_R32G32B32A32_SFLOAT;
+		}
+	}
+
+	/// Octarine: the descriptor numbering the native table uses (octarine's ESpirvDescriptor).
+	static VkDescriptorType nativeDescriptorTypeVK(uint8_t _type)
+	{
+		switch (_type)
+		{
+		case 1:  return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		case 2:  return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		case 3:  return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		case 4:  return VK_DESCRIPTOR_TYPE_SAMPLER;
+		case 5:  return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+		case 6:  return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+		case 7:  return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		case 8:  return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		default: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		}
+	}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 	bool updateExtension(const char* _name, uint32_t _version, bool _instanceExt, Extension _extensions[Extension::Count])
 	{
@@ -1118,6 +1196,16 @@ VK_IMPORT_DEVICE
 			bx::memSet(&lineRasterizationFeatures, 0, sizeof(lineRasterizationFeatures) );
 			bx::memSet(&customBorderColorFeatures, 0, sizeof(customBorderColorFeatures) );
 
+			// Octarine: what the game's own SPIR-V asks of a device. Slang emits SPIR-V 1.5 with
+			// scalar block layout for $Globals, and the native path wants nullDescriptor so an
+			// unbound resource reads zero rather than whatever the driver finds
+			VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features;
+			VkPhysicalDeviceVulkan11Features vulkan11Features;
+			VkPhysicalDeviceVulkan12Features vulkan12Features;
+			bx::memSet(&robustness2Features, 0, sizeof(robustness2Features) );
+			bx::memSet(&vulkan11Features, 0, sizeof(vulkan11Features) );
+			bx::memSet(&vulkan12Features, 0, sizeof(vulkan12Features) );
+
 			m_fbh.idx = kInvalidHandle;
 			bx::memSet(m_uniforms, 0, sizeof(m_uniforms) );
 			bx::memSet(&m_resolution, 0, sizeof(m_resolution) );
@@ -1508,10 +1596,56 @@ VK_IMPORT_INSTANCE
 						customBorderColorFeatures.pNext = NULL;
 					}
 
+					if (s_extension[Extension::EXT_robustness2].m_supported)
+					{
+						next->pNext = (VkBaseOutStructure*)&robustness2Features;
+						next = (VkBaseOutStructure*)&robustness2Features;
+						robustness2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+						robustness2Features.pNext = NULL;
+					}
+
+					if (m_deviceProperties.apiVersion >= VK_API_VERSION_1_2)
+					{
+						next->pNext = (VkBaseOutStructure*)&vulkan11Features;
+						next = (VkBaseOutStructure*)&vulkan11Features;
+						vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+						vulkan11Features.pNext = NULL;
+
+						next->pNext = (VkBaseOutStructure*)&vulkan12Features;
+						next = (VkBaseOutStructure*)&vulkan12Features;
+						vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+						vulkan12Features.pNext = NULL;
+					}
+
 					nextFeatures = deviceFeatures2.pNext;
 
 					vkGetPhysicalDeviceFeatures2KHR(m_physicalDevice, &deviceFeatures2);
 					supportedFeatures = deviceFeatures2.features;
+
+					// everything queried is enabled as is, except what costs for nothing: the
+					// robust access modes and the capture replay address features
+					robustness2Features.robustBufferAccess2 = VK_FALSE;
+					robustness2Features.robustImageAccess2  = VK_FALSE;
+					vulkan12Features.bufferDeviceAddressCaptureReplay = VK_FALSE;
+					vulkan12Features.bufferDeviceAddressMultiDevice   = VK_FALSE;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+					// a device the embedder made has whatever features it was made with, which
+					// cannot be asked; only a device made here is known to have it switched on
+					m_nativeNullDescriptor = VK_NULL_HANDLE == m_device
+						&& s_extension[Extension::EXT_robustness2].m_supported
+						&& robustness2Features.nullDescriptor
+						;
+
+					if (NULL != getenv("OCT_VK_TRACE") )
+					{
+						fprintf(stderr, "bgfx: vk api %u.%u, robustness2 %d nullDescriptor %d, scalarBlockLayout %d, "
+							"shaderDrawParameters %d\n"
+							, VK_API_VERSION_MAJOR(m_deviceProperties.apiVersion), VK_API_VERSION_MINOR(m_deviceProperties.apiVersion)
+							, s_extension[Extension::EXT_robustness2].m_supported, robustness2Features.nullDescriptor
+							, vulkan12Features.scalarBlockLayout, vulkan11Features.shaderDrawParameters);
+					}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 				}
 				else
 				{
@@ -1538,6 +1672,15 @@ VK_IMPORT_INSTANCE
 				m_deviceFeatures.shaderClipDistance   = supportedFeatures.shaderClipDistance;
 				m_deviceFeatures.shaderCullDistance   = supportedFeatures.shaderCullDistance;
 				m_deviceFeatures.shaderResourceMinLod = supportedFeatures.shaderResourceMinLod;
+				// Octarine: the shipped SPIR-V's own needs
+				m_deviceFeatures.shaderInt16   = supportedFeatures.shaderInt16;
+				m_deviceFeatures.shaderInt64   = supportedFeatures.shaderInt64;
+				m_deviceFeatures.shaderFloat64 = supportedFeatures.shaderFloat64;
+				m_deviceFeatures.shaderStorageImageReadWithoutFormat  = supportedFeatures.shaderStorageImageReadWithoutFormat;
+				m_deviceFeatures.shaderStorageImageWriteWithoutFormat = supportedFeatures.shaderStorageImageWriteWithoutFormat;
+				m_deviceFeatures.shaderSampledImageArrayDynamicIndexing  = supportedFeatures.shaderSampledImageArrayDynamicIndexing;
+				m_deviceFeatures.shaderStorageBufferArrayDynamicIndexing = supportedFeatures.shaderStorageBufferArrayDynamicIndexing;
+				m_deviceFeatures.shaderUniformBufferArrayDynamicIndexing = supportedFeatures.shaderUniformBufferArrayDynamicIndexing;
 
 				m_lineAASupport = true
 					&& s_extension[Extension::EXT_line_rasterization].m_supported
@@ -2225,6 +2368,508 @@ VK_IMPORT_DEVICE
 		{
 			m_program[_handle.idx].destroy();
 		}
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: begins a frame's worth of ring state for one externally fed buffer.
+		void resetNativeRing(NativeVkCBuffer& _cbuffer)
+		{
+			_cbuffer.m_ringFrame = m_nativeCBufferFrame;
+			_cbuffer.m_numUses   = 0;
+
+			if (_cbuffer.m_haveLast)
+			{
+				_cbuffer.m_uses[0].m_set   = m_nativeCBufferSet;
+				_cbuffer.m_uses[0].m_slice = _cbuffer.m_lastSlice;
+				_cbuffer.m_numUses = 1;
+				_cbuffer.m_slices[_cbuffer.m_lastSlice].m_frame = m_nativeCBufferFrame;
+			}
+		}
+
+		/// Octarine: stages bytes for one of a native program's constant buffers. The Vulkan
+		/// flavour of the D3D11 ring: a draw's bytes are copied into the frame's scratch buffer
+		/// when it executes, so the ring holds CPU copies and a draw records which one it was
+		/// recorded against.
+		uint32_t updateNativeConstantBuffer(ProgramHandle _handle, bool _fragment, uint8_t _slot
+			, const void* _data, uint32_t _size) override
+		{
+			const ProgramVK& program = m_program[_handle.idx];
+			ShaderVK* shader = const_cast<ShaderVK*>(_fragment ? program.m_fsh : program.m_vsh);
+
+			if (NULL == shader || !shader->m_native)
+			{
+				return m_nativeCBufferSet;
+			}
+
+			for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
+			{
+				NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
+
+				if (cbuffer.m_slot != _slot)
+				{
+					continue;
+				}
+
+				cbuffer.m_scratchOffset = UINT32_MAX;
+				const uint32_t writable = bx::min<uint32_t>(_size, cbuffer.m_size);
+
+				if (cbuffer.m_ringFrame != m_nativeCBufferFrame)
+				{
+					resetNativeRing(cbuffer);
+				}
+
+				if (0 != cbuffer.m_numUses)
+				{
+					const NativeVkSlice& staged = cbuffer.m_slices[cbuffer.m_uses[cbuffer.m_numUses-1].m_slice];
+
+					if (NULL != staged.m_data
+					&&  writable == staged.m_written
+					&&  0 == bx::memCmp(staged.m_data, _data, writable) )
+					{
+						return m_nativeCBufferSet;
+					}
+				}
+
+				uint8_t slice = UINT8_MAX;
+
+				for (uint8_t jj = 0; jj < cbuffer.m_numSlices; ++jj)
+				{
+					const NativeVkSlice& candidate = cbuffer.m_slices[jj];
+
+					if (NULL != candidate.m_data
+					&&  writable == candidate.m_written
+					&&  0 == bx::memCmp(candidate.m_data, _data, writable) )
+					{
+						slice = jj;
+						break;
+					}
+				}
+
+				if (UINT8_MAX == slice)
+				{
+					for (uint8_t jj = 0; jj < cbuffer.m_numSlices; ++jj)
+					{
+						if (cbuffer.m_slices[jj].m_frame != m_nativeCBufferFrame)
+						{
+							slice = jj;
+							break;
+						}
+					}
+
+					if (UINT8_MAX == slice)
+					{
+						if (cbuffer.m_numSlices < kMaxNativeVkSlices)
+						{
+							slice = cbuffer.m_numSlices++;
+							bx::memSet(&cbuffer.m_slices[slice], 0, sizeof(NativeVkSlice) );
+						}
+						else
+						{
+							BX_TRACE("Native constant buffer %d took more than %d values in one frame."
+								, _slot, kMaxNativeVkSlices);
+							slice = 0;
+						}
+					}
+
+					NativeVkSlice& target = cbuffer.m_slices[slice];
+					const uint32_t size = (cbuffer.m_size + 0xf) & ~0xf;
+
+					if (NULL == target.m_data)
+					{
+						target.m_data = (uint8_t*)bx::alloc(g_allocator, size);
+					}
+
+					bx::memCopy(target.m_data, _data, writable);
+					bx::memSet(target.m_data + writable, 0, size - writable);
+					target.m_written      = writable;
+					target.m_scratchFrame = 0;
+				}
+
+				cbuffer.m_slices[slice].m_frame = m_nativeCBufferFrame;
+				cbuffer.m_lastSlice = slice;
+				cbuffer.m_haveLast  = true;
+
+				++m_nativeCBufferSet;
+
+				if (cbuffer.m_numUses < kMaxNativeVkUses)
+				{
+					++cbuffer.m_numUses;
+				}
+
+				NativeVkUse& use = cbuffer.m_uses[cbuffer.m_numUses-1];
+				use.m_set   = m_nativeCBufferSet;
+				use.m_slice = slice;
+
+				return m_nativeCBufferSet;
+			}
+
+			return m_nativeCBufferSet;
+		}
+
+		/// Octarine: where in the frame's scratch buffer one native constant buffer's bytes for
+		/// this draw live, copying them there if they are not yet.
+		uint32_t nativeCBufferOffset(NativeVkCBuffer& _cbuffer, bool _fragment, uint32_t _set
+			, ScratchBufferVK& _scratchBuffer)
+		{
+			static const uint8_t s_zero[64<<10] = {};
+			const uint32_t size = bx::min<uint32_t>( (_cbuffer.m_size + 0xf) & ~0xf, sizeof(s_zero) );
+
+			if (UINT32_MAX != _cbuffer.m_scratchOffset)
+			{
+				const uint8_t* scratch = _fragment ? m_fsScratch : m_vsScratch;
+				const uint32_t avail = uint32_t(sizeof(m_vsScratch) ) - bx::min<uint32_t>(_cbuffer.m_scratchOffset, sizeof(m_vsScratch) );
+				return _scratchBuffer.write(scratch + _cbuffer.m_scratchOffset, bx::min(size, avail) );
+			}
+
+			NativeVkSlice* slice = NULL;
+
+			if (_cbuffer.m_ringFrame == m_nativeCBufferFrame)
+			{
+				for (uint8_t jj = _cbuffer.m_numUses; 0 != jj; --jj)
+				{
+					const NativeVkUse& use = _cbuffer.m_uses[jj-1];
+
+					if (use.m_set <= _set)
+					{
+						slice = &_cbuffer.m_slices[use.m_slice];
+						break;
+					}
+				}
+			}
+
+			if (NULL == slice
+			&&  _cbuffer.m_haveLast)
+			{
+				slice = &_cbuffer.m_slices[_cbuffer.m_lastSlice];
+			}
+
+			if (NULL == slice
+			||  NULL == slice->m_data)
+			{
+				return _scratchBuffer.write(s_zero, size);
+			}
+
+			if (slice->m_scratchFrame != m_nativeCBufferFrame)
+			{
+				slice->m_scratchOffset = _scratchBuffer.write(slice->m_data, size);
+				slice->m_scratchFrame  = m_nativeCBufferFrame;
+			}
+
+			return slice->m_scratchOffset;
+		}
+
+		/// Octarine: the descriptor for a texture a native draw has at a bind stage, read through
+		/// the view type the shader wants (UINT8_MAX for the texture's own).
+		VkDescriptorImageInfo nativeImageInfo(const RenderBind& _renderBind, uint32_t _stage, uint8_t _viewType)
+		{
+			VkDescriptorImageInfo info;
+			info.sampler     = VK_NULL_HANDLE;
+			info.imageView   = VK_NULL_HANDLE;
+			info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+			const Binding* bind = _stage < BGFX_CONFIG_MAX_TEXTURE_SAMPLERS ? &_renderBind.m_bind[_stage] : NULL;
+
+			// without nullDescriptor something valid has to go in, and a texture the draw does
+			// bind is the one thing certain to be; the shader never reads an index nobody wrote
+			if (NULL == bind
+			||  kInvalidHandle == bind->m_idx
+			||  (Binding::Texture != bind->m_type && Binding::Image != bind->m_type) )
+			{
+				if (m_nativeNullDescriptor)
+				{
+					return info;
+				}
+
+				bind = NULL;
+
+				for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_TEXTURE_SAMPLERS; ++ii)
+				{
+					const Binding& other = _renderBind.m_bind[ii];
+
+					if (kInvalidHandle != other.m_idx
+					&&  Binding::Texture == other.m_type)
+					{
+						bind = &other;
+						_viewType = UINT8_MAX;
+						break;
+					}
+				}
+
+				if (NULL == bind)
+				{
+					return info;
+				}
+			}
+
+			const TextureVK& texture = m_textures[bind->m_idx];
+			VkImageViewType type = UINT8_MAX == _viewType ? texture.m_type : VkImageViewType(_viewType);
+
+			// a view the image cannot have falls back to the texture's own shape
+			if ( (VK_IMAGE_VIEW_TYPE_CUBE == type || VK_IMAGE_VIEW_TYPE_CUBE_ARRAY == type)
+			&&  (0 != texture.m_numSides % 6 || VK_IMAGE_VIEW_TYPE_3D == texture.m_type) )
+			{
+				type = texture.m_type;
+			}
+
+			if ( (VK_IMAGE_VIEW_TYPE_3D == type) != (VK_IMAGE_VIEW_TYPE_3D == texture.m_type) )
+			{
+				type = texture.m_type;
+			}
+
+			info.imageLayout = texture.m_sampledLayout;
+			info.imageView   = getCachedImageView({ bind->m_idx }, 0, texture.m_numMips, type);
+			return info;
+		}
+
+		VkDescriptorSet getNativeDescriptorSet(const ProgramVK& _program, const RenderBind& _renderBind
+			, const ScratchBufferVK& _scratchBuffer, const float _palette[][4])
+		{
+			VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+			const VkResult result = m_cmd.m_commandList[m_cmd.m_currentFrameInFlight].m_descriptors.allocate(
+				_program.m_descriptorSetLayout, &descriptorSet);
+
+			if (VK_SUCCESS != result)
+			{
+				BX_TRACE("Native descriptor allocation failed %d: %s.", result, getName(result) );
+				return VK_NULL_HANDLE;
+			}
+
+			constexpr uint32_t kMaxWrites = 2 * (kMaxNativeVkResources + kMaxNativeVkCBuffers);
+			constexpr uint32_t kMaxImages = 2 * (kMaxNativeVkResources + kMaxNativeVkImages + kMaxNativeVkSamplers);
+
+			VkWriteDescriptorSet   wds[kMaxWrites];
+			VkDescriptorImageInfo  imageInfo[kMaxImages];
+			VkDescriptorBufferInfo bufferInfo[kMaxWrites];
+			uint16_t written[kMaxWrites];
+
+			uint32_t wdsCount    = 0;
+			uint32_t imageCount  = 0;
+			uint32_t bufferCount = 0;
+
+			auto isWritten = [&](uint16_t _binding)
+			{
+				for (uint32_t ii = 0; ii < wdsCount; ++ii)
+				{
+					if (written[ii] == _binding)
+					{
+						return true;
+					}
+				}
+
+				return false;
+			};
+
+			auto begin = [&](uint16_t _binding, VkDescriptorType _type, uint32_t _count) -> VkWriteDescriptorSet&
+			{
+				VkWriteDescriptorSet& write = wds[wdsCount];
+				write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				write.pNext            = NULL;
+				write.dstSet           = descriptorSet;
+				write.dstBinding       = _binding;
+				write.dstArrayElement  = 0;
+				write.descriptorCount  = _count;
+				write.descriptorType   = _type;
+				write.pImageInfo       = NULL;
+				write.pBufferInfo      = NULL;
+				write.pTexelBufferView = NULL;
+				written[wdsCount] = _binding;
+				++wdsCount;
+				return write;
+			};
+
+			const ShaderVK* shaders[2] = { _program.m_vsh, _program.m_fsh };
+
+			// the heap's samplers and view types, the union of what both stages state
+			uint32_t samplerFlags[kMaxNativeVkSamplers] = {};
+			uint32_t samplerMask = 0;
+			uint8_t  viewTypes[kMaxNativeVkImages];
+			bx::memSet(viewTypes, 0xff, sizeof(viewTypes) );
+
+			for (const ShaderVK* shader : shaders)
+			{
+				if (NULL == shader || !shader->m_native)
+				{
+					continue;
+				}
+
+				for (uint32_t jj = 0; jj < kMaxNativeVkSamplers; ++jj)
+				{
+					if (0 != (shader->m_nativeSamplerMask & (1u << jj) ) )
+					{
+						samplerFlags[jj] = shader->m_nativeSamplerFlags[jj];
+						samplerMask |= 1u << jj;
+					}
+				}
+
+				for (uint32_t jj = 0; jj < kMaxNativeVkImages; ++jj)
+				{
+					if (UINT8_MAX != shader->m_nativeImageViewType[jj])
+					{
+						viewTypes[jj] = shader->m_nativeImageViewType[jj];
+					}
+				}
+			}
+
+			for (const ShaderVK* shader : shaders)
+			{
+				if (NULL == shader || !shader->m_native)
+				{
+					continue;
+				}
+
+				for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
+				{
+					const NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
+
+					if (isWritten(cbuffer.m_binding) || kMaxWrites == wdsCount)
+					{
+						continue;
+					}
+
+					// both stages may declare one binding (the light binner's block); the range
+					// has to cover the larger
+					uint32_t range = (cbuffer.m_size + 0xf) & ~0xf;
+
+					for (const ShaderVK* other : shaders)
+					{
+						if (NULL == other || !other->m_native)
+						{
+							continue;
+						}
+
+						for (uint8_t jj = 0; jj < other->m_numNativeCBuffers; ++jj)
+						{
+							if (other->m_nativeCBuffers[jj].m_binding == cbuffer.m_binding)
+							{
+								range = bx::max(range, (other->m_nativeCBuffers[jj].m_size + 0xf) & ~0xf);
+							}
+						}
+					}
+
+					bufferInfo[bufferCount].buffer = _scratchBuffer.m_buffer;
+					bufferInfo[bufferCount].offset = 0;
+					bufferInfo[bufferCount].range  = range;
+					begin(cbuffer.m_binding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1).pBufferInfo = &bufferInfo[bufferCount];
+					++bufferCount;
+				}
+
+				for (uint8_t ii = 0; ii < shader->m_numNativeResources; ++ii)
+				{
+					const NativeVkResource& resource = shader->m_nativeResources[ii];
+
+					if (isWritten(resource.m_binding) || kMaxWrites == wdsCount)
+					{
+						continue;
+					}
+
+					const VkDescriptorType type = nativeDescriptorTypeVK(resource.m_type);
+
+					if (1 == resource.m_source)
+					{
+						// THE EMULATED HEAP: slot k is whatever the draw has at bind stage k
+						const uint32_t count = bx::min<uint32_t>(resource.m_count, kMaxNativeVkImages);
+
+						for (uint32_t kk = 0; kk < count; ++kk)
+						{
+							imageInfo[imageCount + kk] = nativeImageInfo(_renderBind, kk, viewTypes[kk]);
+						}
+
+						begin(resource.m_binding, type, count).pImageInfo = &imageInfo[imageCount];
+						imageCount += count;
+						continue;
+					}
+
+					if (2 == resource.m_source)
+					{
+						const uint32_t count = bx::min<uint32_t>(resource.m_count, kMaxNativeVkSamplers);
+
+						for (uint32_t kk = 0; kk < count; ++kk)
+						{
+							VkDescriptorImageInfo& info = imageInfo[imageCount + kk];
+							info.sampler     = getSampler(0 != (samplerMask & (1u << kk) ) ? samplerFlags[kk] : 0
+								, VK_FORMAT_R8G8B8A8_UNORM, _palette);
+							info.imageView   = VK_NULL_HANDLE;
+							info.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+						}
+
+						begin(resource.m_binding, type, count).pImageInfo = &imageInfo[imageCount];
+						imageCount += count;
+						continue;
+					}
+
+					const Binding& bind = _renderBind.m_bind[bx::min<uint32_t>(resource.m_stage, BGFX_CONFIG_MAX_TEXTURE_SAMPLERS - 1)];
+
+					switch (type)
+					{
+					case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+						imageInfo[imageCount] = nativeImageInfo(_renderBind, resource.m_stage, UINT8_MAX);
+						begin(resource.m_binding, type, 1).pImageInfo = &imageInfo[imageCount];
+						++imageCount;
+						break;
+
+					case VK_DESCRIPTOR_TYPE_SAMPLER:
+						{
+							// a sampler rides on its bind stage as the state of a carrier texture
+							uint32_t flags = 0;
+
+							if (kInvalidHandle != bind.m_idx
+							&&  Binding::Texture == bind.m_type)
+							{
+								flags = 0 == (BGFX_SAMPLER_INTERNAL_DEFAULT & bind.m_samplerFlags)
+									? bind.m_samplerFlags
+									: uint32_t(m_textures[bind.m_idx].m_flags)
+									;
+							}
+
+							VkDescriptorImageInfo& info = imageInfo[imageCount];
+							info.sampler     = getSampler(flags, VK_FORMAT_R8G8B8A8_UNORM, _palette);
+							info.imageView   = VK_NULL_HANDLE;
+							info.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+							begin(resource.m_binding, type, 1).pImageInfo = &info;
+							++imageCount;
+						}
+						break;
+
+					case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+						{
+							VkDescriptorBufferInfo& info = bufferInfo[bufferCount];
+							info.buffer = VK_NULL_HANDLE;
+							info.offset = 0;
+							info.range  = VK_WHOLE_SIZE;
+
+							if (kInvalidHandle != bind.m_idx
+							&& (Binding::VertexBuffer == bind.m_type || Binding::IndexBuffer == bind.m_type) )
+							{
+								const BufferVK& buffer = Binding::VertexBuffer == bind.m_type
+									? m_vertexBuffers[bind.m_idx]
+									: m_indexBuffers[bind.m_idx]
+									;
+								info.buffer = buffer.m_buffer;
+								info.range  = buffer.m_size;
+							}
+
+							if (VK_NULL_HANDLE == info.buffer
+							&&  !m_nativeNullDescriptor)
+							{
+								// nothing valid to put there; the binding stays unwritten
+								break;
+							}
+
+							begin(resource.m_binding, type, 1).pBufferInfo = &info;
+							++bufferCount;
+						}
+						break;
+
+					default:
+						BX_TRACE("Native descriptor type %d at binding %d is not fed.", resource.m_type, resource.m_binding);
+						break;
+					}
+				}
+			}
+
+			vkUpdateDescriptorSets(m_device, wdsCount, wds, 0, NULL);
+			return descriptorSet;
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		void* createTexture(TextureHandle _handle, const Memory* _mem, uint64_t _flags, uint8_t _skip) override
 		{
@@ -3055,6 +3700,53 @@ VK_IMPORT_DEVICE
 			_vertexInputState.vertexBindingDescriptionCount   = 0;
 			_vertexInputState.vertexAttributeDescriptionCount = 0;
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native shader states its own inputs by location, in the mesh's formats
+			// and at the mesh's offsets; bgfx's layout contributes only each stream's stride
+			if (_program.m_vsh->m_native)
+			{
+				VkVertexInputBindingDescription*   bindings = const_cast<VkVertexInputBindingDescription*>(_vertexInputState.pVertexBindingDescriptions);
+				VkVertexInputAttributeDescription* attribs  = const_cast<VkVertexInputAttributeDescription*>(_vertexInputState.pVertexAttributeDescriptions);
+
+				for (uint8_t stream = 0; stream < _numStream; ++stream)
+				{
+					bool instanced = false;
+
+					for (uint8_t ii = 0; ii < _program.m_vsh->m_numNativeAttribs; ++ii)
+					{
+						const NativeVkAttrib& attrib = _program.m_vsh->m_nativeAttribs[ii];
+						instanced = instanced || (attrib.m_stream == stream && 0 != attrib.m_instanced);
+					}
+
+					VkVertexInputBindingDescription& binding = bindings[_vertexInputState.vertexBindingDescriptionCount++];
+					binding.binding   = stream;
+					binding.stride    = _layout[stream]->m_stride;
+					binding.inputRate = instanced ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+				}
+
+				for (uint8_t ii = 0; ii < _program.m_vsh->m_numNativeAttribs; ++ii)
+				{
+					const NativeVkAttrib& attrib = _program.m_vsh->m_nativeAttribs[ii];
+
+					if (attrib.m_stream >= _numStream)
+					{
+						BX_TRACE("Native input at location %d reads stream %d, the draw binds %d."
+							, attrib.m_location, attrib.m_stream, _numStream);
+						continue;
+					}
+
+					VkVertexInputAttributeDescription& desc = attribs[_vertexInputState.vertexAttributeDescriptionCount++];
+					desc.location = attrib.m_location;
+					desc.binding  = attrib.m_stream;
+					desc.format   = nativeFormatVK(attrib.m_format);
+					desc.offset   = attrib.m_offset;
+				}
+
+				BX_UNUSED(_numInstanceData);
+				return;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 			uint16_t unsettedAttr[Attrib::Count];
 			bx::memCopy(unsettedAttr, _program.m_vsh->m_attrMask, sizeof(uint16_t) * Attrib::Count);
 
@@ -3384,6 +4076,14 @@ VK_IMPORT_DEVICE
 			sci.mipLodBias       = lodBias;
 			sci.anisotropyEnable = !!(_flags & (BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_ANISOTROPIC) );
 			sci.maxAnisotropy    = m_maxAnisotropy;
+			{
+				// Octarine: a sampler that names its own anisotropy wins over the global value
+				const uint32_t aniso = (_flags & BGFX_SAMPLER_OCT_ANISOTROPY_MASK) >> BGFX_SAMPLER_OCT_ANISOTROPY_SHIFT;
+				if (0 != aniso)
+				{
+					sci.maxAnisotropy = bx::min(float(1u << aniso), m_deviceProperties.limits.maxSamplerAnisotropy);
+				}
+			}
 			sci.compareEnable    = 0 != cmpFunc;
 			sci.compareOp        = s_cmpFunc[cmpFunc];
 			sci.minLod           = 0.0f;
@@ -3501,6 +4201,16 @@ VK_IMPORT_DEVICE
 				| (g_caps.supported & BGFX_CAPS_CONSERVATIVE_RASTER ? BGFX_STATE_CONSERVATIVE_RASTER : 0)
 				| BGFX_STATE_PT_MASK
 				;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native program draws through an upright viewport (see submit), which
+			// mirrors the winding Vulkan sees relative to bgfx's flipped one, so the front face is
+			// the other one for the same draw state
+			if (program.m_vsh->m_native)
+			{
+				_state ^= BGFX_STATE_FRONT_CCW;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 			_stencil &= packStencil(~BGFX_STENCIL_FUNC_REF_MASK, ~BGFX_STENCIL_FUNC_REF_MASK);
 
@@ -3700,14 +4410,33 @@ VK_IMPORT_DEVICE
 			VkPipelineCache cache;
 			VK_CHECK(vkCreatePipelineCache(m_device, &pcci, m_allocatorCb, &cache) );
 
-			VK_CHECK(vkCreateGraphicsPipelines(
-				  m_device
-				, cache
-				, 1
-				, &graphicsPipeline
-				, m_allocatorCb
-				, &pipeline
-				) );
+			{
+				const VkResult pipelineResult = vkCreateGraphicsPipelines(
+					  m_device
+					, cache
+					, 1
+					, &graphicsPipeline
+					, m_allocatorCb
+					, &pipeline
+					);
+
+				// Octarine: said out loud even in a release build. A failed pipeline is otherwise a
+				// VK_NULL_HANDLE bound a moment later, and that faults inside the driver
+				if (VK_SUCCESS != pipelineResult)
+				{
+					bx::debugPrintf("bgfx: vkCreateGraphicsPipelines failed %d: %s\n", pipelineResult, getName(pipelineResult) );
+					fprintf(stderr, "bgfx: vkCreateGraphicsPipelines failed %d: %s (native %d, vs %d bindings, fs %d bindings, %d streams, %u attribs)\n"
+						, pipelineResult, getName(pipelineResult)
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+						, program.m_vsh->m_native
+#else
+						, 0
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+						, program.m_vsh->m_numBindings, NULL != program.m_fsh ? program.m_fsh->m_numBindings : -1
+						, _numStreams, vertexInputState.vertexAttributeDescriptionCount);
+					pipeline = VK_NULL_HANDLE;
+				}
+			}
 			m_pipelineStateCache.add(hash, pipeline);
 
 			size_t dataSize;
@@ -4377,6 +5106,15 @@ VK_IMPORT_DEVICE
 
 		bool m_lineAASupport;
 		bool m_borderColorSupport;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: VK_EXT_robustness2's nullDescriptor is on, so an unbound native resource can
+		/// be written as VK_NULL_HANDLE and read as zero.
+		bool m_nativeNullDescriptor = false;
+		/// Octarine: the same two counters the D3D11 flavour keeps; see its comments.
+		uint32_t m_nativeCBufferFrame = 1;
+		uint32_t m_nativeCBufferSet = 0;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		bool m_timerQuerySupport;
 
 		FrameBufferVK m_backBuffer;
@@ -4983,6 +5721,139 @@ VK_DESTROY
 
 		bx::read(&reader, m_size, &err);
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		// Octarine: a shipped Source 2 SPIR-V, rewritten into one descriptor set, with the table
+		// that says what fills each of its descriptors. See octarine's CVfxContainer::BuildVulkan
+		m_native = isShaderNative(magic);
+
+		if (m_native)
+		{
+			uint32_t tag = 0;
+			bx::read(&reader, tag, &err);
+			BGFX_FATAL(BX_MAKEFOURCC('O', 'C', 'T', 'V') == tag, bgfx::Fatal::InvalidShader
+				, "Native Vulkan shader is missing its binding table.");
+
+			const uint32_t maxAttribs = bx::min<uint32_t>(kMaxNativeVkAttribs
+				, Attrib::Count + BGFX_CONFIG_MAX_INSTANCE_DATA_COUNT);
+
+			uint8_t numAttribs = 0;
+			bx::read(&reader, numAttribs, &err);
+			BGFX_FATAL(numAttribs <= maxAttribs, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d vertex attributes, %d is the maximum.", numAttribs, maxAttribs);
+
+			for (uint8_t ii = 0; ii < numAttribs; ++ii)
+			{
+				NativeVkAttrib& attrib = m_nativeAttribs[ii];
+				bx::read(&reader, attrib.m_location, &err);
+				bx::read(&reader, attrib.m_format, &err);
+				bx::read(&reader, attrib.m_stream, &err);
+				bx::read(&reader, attrib.m_offset, &err);
+				bx::read(&reader, attrib.m_instanced, &err);
+			}
+
+			m_numNativeAttribs = numAttribs;
+
+			uint8_t numCBuffers = 0;
+			bx::read(&reader, numCBuffers, &err);
+			BGFX_FATAL(numCBuffers <= kMaxNativeVkCBuffers, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d constant buffers, %d is the maximum.", numCBuffers, kMaxNativeVkCBuffers);
+
+			for (uint8_t ii = 0; ii < numCBuffers; ++ii)
+			{
+				NativeVkCBuffer& cbuffer = m_nativeCBuffers[ii];
+				bx::memSet(&cbuffer, 0, sizeof(cbuffer) );
+				bx::read(&reader, cbuffer.m_slot, &err);
+				bx::read(&reader, cbuffer.m_binding, &err);
+				bx::read(&reader, cbuffer.m_scratchOffset, &err);
+				bx::read(&reader, cbuffer.m_size, &err);
+			}
+
+			m_numNativeCBuffers = numCBuffers;
+
+			uint8_t numResources = 0;
+			bx::read(&reader, numResources, &err);
+			BGFX_FATAL(numResources <= kMaxNativeVkResources, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d descriptors, %d is the maximum.", numResources, kMaxNativeVkResources);
+
+			for (uint8_t ii = 0; ii < numResources; ++ii)
+			{
+				NativeVkResource& resource = m_nativeResources[ii];
+				bx::read(&reader, resource.m_binding, &err);
+				bx::read(&reader, resource.m_type, &err);
+				bx::read(&reader, resource.m_source, &err);
+				bx::read(&reader, resource.m_stage, &err);
+				bx::read(&reader, resource.m_count, &err);
+			}
+
+			m_numNativeResources = numResources;
+
+			m_nativeSamplerMask = 0;
+			uint8_t numSamplers = 0;
+			bx::read(&reader, numSamplers, &err);
+
+			for (uint8_t ii = 0; ii < numSamplers; ++ii)
+			{
+				uint8_t  slot  = 0;
+				uint32_t flags = 0;
+				bx::read(&reader, slot, &err);
+				bx::read(&reader, flags, &err);
+
+				if (slot < kMaxNativeVkSamplers)
+				{
+					m_nativeSamplerFlags[slot] = flags;
+					m_nativeSamplerMask |= 1u << slot;
+				}
+			}
+
+			bx::memSet(m_nativeImageViewType, 0xff, sizeof(m_nativeImageViewType) );
+			uint8_t numViews = 0;
+			bx::read(&reader, numViews, &err);
+
+			for (uint8_t ii = 0; ii < numViews; ++ii)
+			{
+				uint8_t slot = 0;
+				uint8_t type = 0;
+				bx::read(&reader, slot, &err);
+				bx::read(&reader, type, &err);
+
+				if (slot < kMaxNativeVkImages)
+				{
+					m_nativeImageViewType[slot] = type;
+				}
+			}
+
+			// the input layout is part of the pipeline, and it lives in the table rather than in
+			// anything bgfx hashes
+			m_hash ^= bx::hash<bx::HashMurmur2A>(m_nativeAttribs, sizeof(NativeVkAttrib) * m_numNativeAttribs);
+
+			uint16_t nidx = 0;
+
+			for (uint8_t ii = 0; ii < m_numNativeCBuffers; ++ii)
+			{
+				VkDescriptorSetLayoutBinding& binding = m_bindings[nidx++];
+				binding.binding            = m_nativeCBuffers[ii].m_binding;
+				binding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+				binding.descriptorCount    = 1;
+				binding.stageFlags         = shaderStage;
+				binding.pImmutableSamplers = NULL;
+			}
+
+			for (uint8_t ii = 0; ii < m_numNativeResources; ++ii)
+			{
+				VkDescriptorSetLayoutBinding& binding = m_bindings[nidx++];
+				binding.binding            = m_nativeResources[ii].m_binding;
+				binding.descriptorType     = nativeDescriptorTypeVK(m_nativeResources[ii].m_type);
+				binding.descriptorCount    = bx::max<uint32_t>(1, m_nativeResources[ii].m_count);
+				binding.stageFlags         = shaderStage;
+				binding.pImmutableSamplers = NULL;
+			}
+
+			m_numBindings = nidx;
+			m_size = 0;
+			return;
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 		// fill binding description with uniform information
 		uint16_t bidx = 0;
 		if (m_size > 0)
@@ -5053,6 +5924,30 @@ VK_DESTROY
 			UniformBuffer::destroy(m_constantBuffer);
 			m_constantBuffer = NULL;
 		}
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		for (uint8_t ii = 0; ii < m_numNativeCBuffers; ++ii)
+		{
+			NativeVkCBuffer& cbuffer = m_nativeCBuffers[ii];
+
+			for (uint8_t jj = 0; jj < cbuffer.m_numSlices; ++jj)
+			{
+				if (NULL != cbuffer.m_slices[jj].m_data)
+				{
+					bx::free(g_allocator, cbuffer.m_slices[jj].m_data);
+					cbuffer.m_slices[jj].m_data = NULL;
+				}
+			}
+
+			cbuffer.m_numSlices = 0;
+		}
+
+		m_native = false;
+		m_numNativeAttribs = 0;
+		m_numNativeCBuffers = 0;
+		m_numNativeResources = 0;
+		m_nativeSamplerMask = 0;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		m_numPredefined = 0;
 
@@ -5222,6 +6117,36 @@ VK_DESTROY
 			, s_renderVK->m_allocatorCb
 			, &m_pipelineLayout
 			) );
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		if (m_vsh->m_native
+		&&  NULL != getenv("OCT_VK_TRACE") )
+		{
+			fprintf(stderr, "bgfx: native program, set layout %p, pipeline layout %p, vs %d bindings, fs %d bindings\n"
+				, (void*)m_descriptorSetLayout, (void*)m_pipelineLayout
+				, m_vsh->m_numBindings, NULL != m_fsh ? m_fsh->m_numBindings : -1);
+
+			for (uint32_t ss = 0; ss < 2; ++ss)
+			{
+				const ShaderVK* shader = 0 == ss ? m_vsh : m_fsh;
+
+				for (uint16_t ii = 0; NULL != shader && ii < shader->m_numBindings; ++ii)
+				{
+					fprintf(stderr, "bgfx:   %s binding %u type %d count %u\n", 0 == ss ? "vs" : "fs"
+						, shader->m_bindings[ii].binding, shader->m_bindings[ii].descriptorType
+						, shader->m_bindings[ii].descriptorCount);
+				}
+
+				for (uint8_t ii = 0; NULL != shader && ii < shader->m_numNativeAttribs; ++ii)
+				{
+					fprintf(stderr, "bgfx:   attrib location %u format %u stream %u offset %u instanced %u\n"
+						, shader->m_nativeAttribs[ii].m_location, shader->m_nativeAttribs[ii].m_format
+						, shader->m_nativeAttribs[ii].m_stream, shader->m_nativeAttribs[ii].m_offset
+						, shader->m_nativeAttribs[ii].m_instanced);
+				}
+			}
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 	}
 
 	void ProgramVK::destroy()
@@ -8101,6 +9026,12 @@ VK_DESTROY
 		uint32_t currentBindHash = 0;
 		uint32_t descriptorSetCount = 0;
 		VkIndexType currentIndexFormat = VK_INDEX_TYPE_MAX_ENUM;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		// Octarine: the view's own viewport, and whether a native draw has replaced it with the
+		// upright one the shipped SPIR-V wants
+		VkViewport viewViewport = {};
+		bool nativeViewport = false;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		SortKey key;
 		uint16_t view = UINT16_MAX;
 		FrameBufferHandle fbh = { BGFX_CONFIG_MAX_FRAME_BUFFERS };
@@ -8232,9 +9163,14 @@ VK_DESTROY
 						vp.y        =  float(rect.m_y + rect.m_height);
 						vp.width    =  float(rect.m_width);
 						vp.height   = -float(rect.m_height);
-						vp.minDepth = 0.0f;
-						vp.maxDepth = 1.0f;
+						// Octarine: the view's depth range, 0..1 unless setViewDepthRange said otherwise
+						vp.minDepth = _render->m_view[view].m_depthMin;
+						vp.maxDepth = _render->m_view[view].m_depthMax;
 						vkCmdSetViewport(m_commandBuffer, 0, 1, &vp);
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+						viewViewport   = vp;
+						nativeViewport = false;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 						VkRect2D rc;
 						rc.offset.x      = viewScissorRect.m_x;
@@ -8519,6 +9455,12 @@ VK_DESTROY
 							, uint8_t(draw.m_instanceDataStride/16)
 							);
 
+					if (VK_NULL_HANDLE == pipeline)
+					{
+						// nothing to draw with; binding a null pipeline faults in the driver
+						continue;
+					}
+
 					if (currentPipeline != pipeline)
 					{
 						currentPipeline = pipeline;
@@ -8628,6 +9570,112 @@ VK_DESTROY
 						viewState.setPredefined<4>(this, view, program, _render, draw);
 					}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+					// Octarine: a shipped Vulkan shader writes Vulkan clip space - its y is already
+					// the negation of the D3D build's - so it is drawn through an upright viewport
+					// rather than bgfx's flipped one, and the two produce the same image
+					if (program.m_vsh->m_native != nativeViewport)
+					{
+						nativeViewport = program.m_vsh->m_native;
+						VkViewport vp = viewViewport;
+
+						if (nativeViewport)
+						{
+							vp.y      = viewViewport.y + viewViewport.height;
+							vp.height = -viewViewport.height;
+						}
+
+						vkCmdSetViewport(m_commandBuffer, 0, 1, &vp);
+					}
+
+					if (program.m_vsh->m_native
+					&&  VK_NULL_HANDLE != program.m_descriptorSetLayout)
+					{
+						// every uniform buffer of the pair is a dynamic one in the scratch buffer,
+						// and the offsets go in binding order
+						struct { uint16_t binding; uint32_t offset; } dynamic[2 * kMaxNativeVkCBuffers];
+						uint32_t numDynamic = 0;
+
+						for (uint32_t ss = 0; ss < 2; ++ss)
+						{
+							ShaderVK* shader = const_cast<ShaderVK*>(0 == ss ? program.m_vsh : program.m_fsh);
+
+							if (NULL == shader || !shader->m_native)
+							{
+								continue;
+							}
+
+							for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
+							{
+								NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
+								bool seen = false;
+
+								for (uint32_t jj = 0; jj < numDynamic; ++jj)
+								{
+									seen = seen || dynamic[jj].binding == cbuffer.m_binding;
+								}
+
+								if (seen)
+								{
+									continue;
+								}
+
+								dynamic[numDynamic].binding = cbuffer.m_binding;
+								dynamic[numDynamic].offset  = nativeCBufferOffset(cbuffer, 1 == ss, draw.m_nativeCBufferSet, scratchBuffer);
+								++numDynamic;
+							}
+						}
+
+						for (uint32_t ii = 1; ii < numDynamic; ++ii)
+						{
+							for (uint32_t jj = ii; 0 < jj && dynamic[jj-1].binding > dynamic[jj].binding; --jj)
+							{
+								const auto swap = dynamic[jj];
+								dynamic[jj]   = dynamic[jj-1];
+								dynamic[jj-1] = swap;
+							}
+						}
+
+						uint32_t offsets[2 * kMaxNativeVkCBuffers];
+
+						for (uint32_t ii = 0; ii < numDynamic; ++ii)
+						{
+							offsets[ii] = dynamic[ii].offset;
+						}
+
+						bx::HashMurmur2A hash;
+						hash.begin();
+						hash.add(program.m_descriptorSetLayout);
+						hash.add(currentProgram.idx);
+						hash.add(renderBind.m_bind, sizeof(renderBind.m_bind) );
+						const uint32_t bindHash = hash.end();
+
+						if (currentBindHash != bindHash)
+						{
+							currentBindHash = bindHash;
+							currentDescriptorSet = getNativeDescriptorSet(program, renderBind, scratchBuffer, _render->m_colorPalette);
+
+							if (VK_NULL_HANDLE == currentDescriptorSet)
+							{
+								break;
+							}
+
+							descriptorSetCount++;
+						}
+
+						vkCmdBindDescriptorSets(
+							  m_commandBuffer
+							, VK_PIPELINE_BIND_POINT_GRAPHICS
+							, program.m_pipelineLayout
+							, 0
+							, 1
+							, &currentDescriptorSet
+							, numDynamic
+							, offsets
+							);
+					}
+					else
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 					if (VK_NULL_HANDLE != program.m_descriptorSetLayout)
 					{
 						const uint32_t vsize = program.m_vsh->m_size;
@@ -9054,6 +10102,11 @@ VK_DESTROY
 		m_presentElapsed = 0;
 
 		scratchBuffer.flush();
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		// every draw of this frame has been recorded against the slices it staged
+		++m_nativeCBufferFrame;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		for (uint16_t ii = 0; ii < m_numWindows; ++ii)
 		{

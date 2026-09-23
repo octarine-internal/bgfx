@@ -179,6 +179,7 @@ typedef enum bgfx_texture_format
     BGFX_TEXTURE_FORMAT_BC4,                  /** ( 3) LATC1/ATI1 R8                  */
     BGFX_TEXTURE_FORMAT_BC5,                  /** ( 4) LATC2/ATI2 RG8                 */
     BGFX_TEXTURE_FORMAT_BC6H,                 /** ( 5) BC6H RGB16F                    */
+    BGFX_TEXTURE_FORMAT_BC6H_UF16,            /** ( 6) BC6H RGB16F unsigned           */
     BGFX_TEXTURE_FORMAT_BC7,                  /** ( 6) BC7 RGB 4-7 bits per color channel, 0-8 bits alpha */
     BGFX_TEXTURE_FORMAT_ETC1,                 /** ( 7) ETC1 RGB8                      */
     BGFX_TEXTURE_FORMAT_ETC2,                 /** ( 8) ETC2 RGB8                      */

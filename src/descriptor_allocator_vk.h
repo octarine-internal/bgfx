@@ -34,7 +34,9 @@ namespace bgfx { namespace vk
 					{
 						{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          kSetsPerPool * m_api.maxSamplers },
 						{ VK_DESCRIPTOR_TYPE_SAMPLER,                kSetsPerPool * m_api.maxSamplers },
-						{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kSetsPerPool * 2                 },
+						// Octarine: a native Source 2 program binds a handful of constant buffers
+						{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kSetsPerPool * 8                 },
+						{ VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,   kSetsPerPool * 4                 },
 						{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         kSetsPerPool * m_api.maxSamplers },
 						{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          kSetsPerPool * m_api.maxSamplers },
 					};

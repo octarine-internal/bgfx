@@ -222,6 +222,7 @@ namespace bgfx { namespace gl
 		{ GL_COMPRESSED_LUMINANCE_LATC1_EXT,           GL_ZERO,                                      GL_COMPRESSED_LUMINANCE_LATC1_EXT,           GL_COMPRESSED_LUMINANCE_LATC1_EXT,           GL_ZERO,                         false, { $_, $_, $_, $_ } }, // BC4
 		{ GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT,     GL_ZERO,                                      GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT,     GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT,     GL_ZERO,                         false, { $_, $_, $_, $_ } }, // BC5
 		{ GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT_ARB,     GL_ZERO,                                      GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT_ARB,     GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT_ARB,     GL_ZERO,                         false, { $_, $_, $_, $_ } }, // BC6H
+		{ GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_ARB,   GL_ZERO,                                      GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_ARB,   GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_ARB,   GL_ZERO,                         false, { $_, $_, $_, $_ } }, // BC6H_UF16
 		{ GL_COMPRESSED_RGBA_BPTC_UNORM_ARB,           GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB,      GL_COMPRESSED_RGBA_BPTC_UNORM_ARB,           GL_COMPRESSED_RGBA_BPTC_UNORM_ARB,           GL_ZERO,                         false, { $_, $_, $_, $_ } }, // BC7
 		{ GL_ETC1_RGB8_OES,                            GL_ZERO,                                      GL_ETC1_RGB8_OES,                            GL_ETC1_RGB8_OES,                            GL_ZERO,                         false, { $_, $_, $_, $_ } }, // ETC1
 		{ GL_COMPRESSED_RGB8_ETC2,                     GL_ZERO,                                      GL_COMPRESSED_RGB8_ETC2,                     GL_COMPRESSED_RGB8_ETC2,                     GL_ZERO,                         false, { $_, $_, $_, $_ } }, // ETC2
@@ -324,6 +325,7 @@ namespace bgfx { namespace gl
 		GL_ZERO,               // BC4
 		GL_ZERO,               // BC5
 		GL_ZERO,               // BC6H
+		GL_ZERO,               // BC6H_UF16
 		GL_ZERO,               // BC7
 		GL_ZERO,               // ETC1
 		GL_ZERO,               // ETC2
@@ -417,6 +419,7 @@ namespace bgfx { namespace gl
 		GL_ZERO,           // BC4
 		GL_ZERO,           // BC5
 		GL_ZERO,           // BC6H
+		GL_ZERO,           // BC6H_UF16
 		GL_ZERO,           // BC7
 		GL_ZERO,           // ETC1
 		GL_ZERO,           // ETC2

@@ -169,6 +169,7 @@ namespace bgfx { namespace d3d9
 		{ D3DFMT_UNKNOWN       }, // BC4
 		{ D3DFMT_UNKNOWN       }, // BC5
 		{ D3DFMT_UNKNOWN       }, // BC6H
+		{ D3DFMT_UNKNOWN       }, // BC6H_UF16
 		{ D3DFMT_UNKNOWN       }, // BC7
 		{ D3DFMT_UNKNOWN       }, // ETC1
 		{ D3DFMT_UNKNOWN       }, // ETC2

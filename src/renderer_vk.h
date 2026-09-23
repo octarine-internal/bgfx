@@ -439,6 +439,77 @@ VK_DESTROY_FUNC(SurfaceKHR);
 		VkImageViewType type;
 	};
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+	/// Octarine: one vertex input of a native (shipped Source 2) SPIR-V shader, by location. The
+	/// format is a DXGI_FORMAT, as the mesh states it; see nativeFormatVK.
+	struct NativeVkAttrib
+	{
+		uint32_t m_format;
+		uint16_t m_offset;
+		uint8_t  m_location;
+		uint8_t  m_stream;
+		uint8_t  m_instanced;
+	};
+
+	/// Octarine: how many distinct values one externally fed constant buffer can take in a frame,
+	/// and how often it may switch between them; the same ring the D3D11 flavour keeps, held on
+	/// the CPU because a Vulkan draw reads its bytes out of the frame's scratch buffer.
+	constexpr uint32_t kMaxNativeVkSlices = 8;
+	constexpr uint32_t kMaxNativeVkUses   = 16;
+
+	struct NativeVkSlice
+	{
+		uint8_t* m_data;         //!< NULL until written once; always m_size bytes.
+		uint32_t m_written;      //!< Bytes the writer supplied; the rest is zero.
+		uint32_t m_frame;        //!< Frame this slice was last claimed in.
+		uint32_t m_scratchFrame; //!< Frame m_scratchOffset belongs to.
+		uint32_t m_scratchOffset;
+	};
+
+	struct NativeVkUse
+	{
+		uint32_t m_set;
+		uint8_t  m_slice;
+	};
+
+	/// Octarine: one constant buffer of a native shader. On the uniform path its bytes live in the
+	/// stage scratch at m_scratchOffset; fed from outside (m_scratchOffset UINT32_MAX) they live in
+	/// the ring. Either way a draw copies them into the frame's scratch buffer and binds that
+	/// range as a dynamic uniform buffer at m_binding.
+	struct NativeVkCBuffer
+	{
+		uint32_t m_scratchOffset;
+		uint32_t m_size;
+		uint16_t m_binding;
+		uint8_t  m_slot;
+
+		NativeVkSlice m_slices[kMaxNativeVkSlices];
+		NativeVkUse   m_uses[kMaxNativeVkUses];
+		uint32_t m_ringFrame;
+		uint8_t  m_numSlices;
+		uint8_t  m_numUses;
+		uint8_t  m_lastSlice;
+		bool     m_haveLast;
+	};
+
+	/// Octarine: every other descriptor of a native shader: where it sits in the program's one
+	/// descriptor set and what fills it - a bind stage, or the emulated bindless heap.
+	struct NativeVkResource
+	{
+		uint16_t m_binding;
+		uint16_t m_count;
+		uint8_t  m_type;   //!< the fork's descriptor numbering, see nativeDescriptorTypeVK
+		uint8_t  m_source; //!< 0 bind stage, 1 bindless images, 2 bindless samplers
+		uint8_t  m_stage;
+	};
+
+	constexpr uint32_t kMaxNativeVkAttribs   = 24;
+	constexpr uint32_t kMaxNativeVkCBuffers  = 16;
+	constexpr uint32_t kMaxNativeVkResources = 48;
+	constexpr uint32_t kMaxNativeVkSamplers  = 32;
+	constexpr uint32_t kMaxNativeVkImages    = 64;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 	struct ShaderVK
 	{
 		ShaderVK()
@@ -456,6 +527,22 @@ VK_DESTROY_FUNC(SurfaceKHR);
 
 		void create(const Memory* _mem);
 		void destroy();
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		bool m_native = false;
+		uint8_t m_numNativeAttribs = 0;
+		uint8_t m_numNativeCBuffers = 0;
+		uint8_t m_numNativeResources = 0;
+		NativeVkAttrib   m_nativeAttribs[kMaxNativeVkAttribs];
+		NativeVkCBuffer  m_nativeCBuffers[kMaxNativeVkCBuffers];
+		NativeVkResource m_nativeResources[kMaxNativeVkResources];
+		/// the emulated heap's sampler states by slot; bit j of m_nativeSamplerMask says slot j
+		/// was stated
+		uint32_t m_nativeSamplerFlags[kMaxNativeVkSamplers];
+		uint32_t m_nativeSamplerMask = 0;
+		/// the image view type a heap slot is read as, or UINT8_MAX for the texture's own
+		uint8_t m_nativeImageViewType[kMaxNativeVkImages];
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 		const Memory* m_code;
 		VkShaderModule m_module;
