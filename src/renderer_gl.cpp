@@ -7514,7 +7514,7 @@ namespace bgfx { namespace gl
 		if (m_timerQuerySupport
 		&&  !BX_ENABLED(BX_PLATFORM_OSX) )
 		{
-			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
+			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
 		}
 
 		if (0 < _render->m_iboffset)

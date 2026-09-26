@@ -910,6 +910,7 @@ struct.ViewStats
 	.cpuTimeEnd     "int64_t"   --- CPU (submit) end time.
 	.gpuTimeBegin   "int64_t"   --- GPU begin time.
 	.gpuTimeEnd     "int64_t"   --- GPU end time.
+	.gpuFrameNum    "uint32_t"  --- Frame which generated gpuTimeBegin, gpuTimeEnd.
 
 --- Encoder stats.
 struct.EncoderStats

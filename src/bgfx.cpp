@@ -2345,6 +2345,7 @@ namespace bgfx
 		m_submit->resetFreeHandles();
 
 		m_submit->finish();
+		m_submit->m_frameNum = m_frames + 1;
 
 		bx::swap(m_render, m_submit);
 

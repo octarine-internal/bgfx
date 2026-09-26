@@ -17,6 +17,8 @@
 
 #define BGFX_API_VERSION UINT32_C(115)
 
+#define BGFX_OCT_VIEWSTATS_FRAMENUM 1 //!< Octarine: `ViewStats::gpuFrameNum` names the frame each view's GPU time came from.
+
 /**
  * Color RGB/alpha/depth write. When it's not specified write will be disabled.
  *

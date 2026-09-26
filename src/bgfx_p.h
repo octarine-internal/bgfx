@@ -2144,6 +2144,7 @@ namespace bgfx
 		Frame()
 			: m_waitSubmit(0)
 			, m_waitRender(0)
+			, m_frameNum(0)
 			, m_capture(false)
 		{
 			SortKey term;
@@ -2420,6 +2421,8 @@ namespace bgfx
 
 		int64_t m_waitSubmit;
 		int64_t m_waitRender;
+
+		uint32_t m_frameNum;
 
 		bool m_capture;
 	};

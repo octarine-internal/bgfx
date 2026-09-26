@@ -3988,9 +3988,9 @@ namespace bgfx { namespace webgpu
 	{
 	}
 
-	uint32_t TimerQueryWgpu::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryWgpu::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
-		BX_UNUSED(_resultIdx);
+		BX_UNUSED(_resultIdx, _frameNum);
 		return 0;
 	}
 

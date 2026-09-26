@@ -5693,7 +5693,7 @@ namespace bgfx { namespace d3d12
 		DX_RELEASE(m_readback, 0);
 	}
 
-	uint32_t TimerQueryD3D12::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryD3D12::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
 		while (0 == m_control.reserve(1) )
 		{
@@ -5706,6 +5706,7 @@ namespace bgfx { namespace d3d12
 		const uint32_t idx = m_control.m_current;
 		Query& query = m_query[idx];
 		query.m_resultIdx = _resultIdx;
+		query.m_frameNum  = _frameNum;
 		query.m_ready     = false;
 
 		ID3D12GraphicsCommandList* commandList = s_renderD3D12->m_commandList;
@@ -5770,8 +5771,9 @@ namespace bgfx { namespace d3d12
 			--result.m_pending;
 
 			uint32_t offset = idx * 2;
-			result.m_begin  = m_queryResult[offset+0];
-			result.m_end    = m_queryResult[offset+1];
+			result.m_begin    = m_queryResult[offset+0];
+			result.m_end      = m_queryResult[offset+1];
+			result.m_frameNum = query.m_frameNum;
 
 			return true;
 		}
@@ -6003,7 +6005,7 @@ namespace bgfx { namespace d3d12
 		int64_t timeBegin = bx::getHPCounter();
 		int64_t captureElapsed = 0;
 
-		uint32_t frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
+		uint32_t frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
 
 		if (0 < _render->m_iboffset)
 		{

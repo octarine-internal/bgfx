@@ -3536,7 +3536,7 @@ namespace bgfx { namespace d3d9
 		}
 	}
 
-	uint32_t TimerQueryD3D9::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryD3D9::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
 		while (0 == m_control.reserve(1) )
 		{
@@ -3549,6 +3549,7 @@ namespace bgfx { namespace d3d9
 		const uint32_t idx = m_control.m_current;
 		Query& query = m_query[idx];
 		query.m_resultIdx = _resultIdx;
+		query.m_frameNum  = _frameNum;
 		query.m_ready     = false;
 
 		query.m_disjoint->Issue(D3DISSUE_BEGIN);
@@ -3604,6 +3605,7 @@ namespace bgfx { namespace d3d9
 				result.m_frequency = freq;
 				result.m_begin     = timeBegin;
 				result.m_end       = timeEnd;
+				result.m_frameNum  = query.m_frameNum;
 
 				return true;
 			}
@@ -3750,7 +3752,7 @@ namespace bgfx { namespace d3d9
 		// device->BeginScene();
 		if (m_timerQuerySupport)
 		{
-			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
+			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
 		}
 
 		if (0 < _render->m_iboffset)

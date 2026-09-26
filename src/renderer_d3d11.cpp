@@ -5985,7 +5985,7 @@ namespace bgfx { namespace d3d11
 		}
 	}
 
-	uint32_t TimerQueryD3D11::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryD3D11::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
 		ID3D11DeviceContext* deviceCtx = s_renderD3D11->m_deviceCtx;
 
@@ -6000,6 +6000,7 @@ namespace bgfx { namespace d3d11
 		const uint32_t idx = m_control.m_current;
 		Query& query = m_query[idx];
 		query.m_resultIdx = _resultIdx;
+		query.m_frameNum  = _frameNum;
 		query.m_ready     = false;
 
 		deviceCtx->Begin(query.m_disjoint);
@@ -6061,6 +6062,7 @@ namespace bgfx { namespace d3d11
 				result.m_frequency = disjoint.Frequency;
 				result.m_begin     = timeBegin;
 				result.m_end       = timeEnd;
+				result.m_frameNum  = query.m_frameNum;
 
 				return true;
 			}
@@ -6243,7 +6245,7 @@ namespace bgfx { namespace d3d11
 
 		if (m_timerQuerySupport)
 		{
-			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
+			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
 		}
 
 		if (0 < _render->m_iboffset)

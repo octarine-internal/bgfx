@@ -3679,9 +3679,9 @@ BX_STATIC_ASSERT(BX_COUNTOF(s_accessNames) == Access::Count, "Invalid s_accessNa
 	{
 	}
 
-	uint32_t TimerQueryMtl::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryMtl::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
-		BX_UNUSED(_resultIdx);
+		BX_UNUSED(_resultIdx, _frameNum);
 		return 0;
 	}
 

@@ -6220,7 +6220,7 @@ VK_DESTROY
 		vkDestroy(m_readbackMemory);
 	}
 
-	uint32_t TimerQueryVK::begin(uint32_t _resultIdx)
+	uint32_t TimerQueryVK::begin(uint32_t _resultIdx, uint32_t _frameNum)
 	{
 		while (0 == m_control.reserve(1) )
 		{
@@ -6233,6 +6233,7 @@ VK_DESTROY
 		const uint32_t idx = m_control.m_current;
 		Query& query = m_query[idx];
 		query.m_resultIdx = _resultIdx;
+		query.m_frameNum  = _frameNum;
 		query.m_ready     = false;
 
 		const VkCommandBuffer commandBuffer = s_renderVK->m_commandBuffer;
@@ -6298,8 +6299,9 @@ VK_DESTROY
 			--result.m_pending;
 
 			uint32_t offset = idx * 2;
-			result.m_begin  = m_queryResult[offset+0];
-			result.m_end    = m_queryResult[offset+1];
+			result.m_begin    = m_queryResult[offset+0];
+			result.m_end      = m_queryResult[offset+1];
+			result.m_frameNum = query.m_frameNum;
 
 			return true;
 		}
@@ -8989,7 +8991,7 @@ VK_DESTROY
 
 		if (m_timerQuerySupport)
 		{
-			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS);
+			frameQueryIdx = m_gpuTimer.begin(BGFX_CONFIG_MAX_VIEWS, _render->m_frameNum);
 		}
 
 		if (0 < _render->m_iboffset)

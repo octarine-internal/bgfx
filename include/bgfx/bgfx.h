@@ -962,6 +962,7 @@ namespace bgfx
 		int64_t cpuTimeEnd;     //!< CPU (submit) end time.
 		int64_t gpuTimeBegin;   //!< GPU begin time.
 		int64_t gpuTimeEnd;     //!< GPU end time.
+		uint32_t gpuFrameNum;   //!< Frame which generated gpuTimeBegin, gpuTimeEnd, as returned by `bgfx::frame`; 0 when none has resolved yet.
 	};
 
 	/// Encoder stats.
