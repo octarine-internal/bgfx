@@ -2744,17 +2744,33 @@ namespace bgfx
 
 		bx::quickSort(scores, numScores, bx::compareDescending<int32_t>);
 
+		// Octarine: an embedder's context is the device of the backend it asked for, and any other
+		// backend would take it for its own device type. That backend alone is tried, and a failure
+		// is not remembered, so the embedder's next init can try it again
+		const bool adopted = NULL != _init.platformData.context
+			&& RendererType::Count != _init.type
+			;
+
 		RendererContextI* renderCtx = NULL;
 		for (uint32_t ii = 0; ii < numScores; ++ii)
 		{
 			RendererType::Enum renderer = RendererType::Enum(scores[ii] & 0xff);
+			if (adopted
+			&&  renderer != _init.type)
+			{
+				continue;
+			}
+
 			renderCtx = s_rendererCreator[renderer].createFn(_init);
 			if (NULL != renderCtx)
 			{
 				break;
 			}
 
-			s_rendererCreator[renderer].supported = false;
+			if (!adopted)
+			{
+				s_rendererCreator[renderer].supported = false;
+			}
 		}
 
 		return renderCtx;

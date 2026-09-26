@@ -170,6 +170,7 @@
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdBindIndexBuffer);            \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdBindVertexBuffers);          \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdClearColorImage);            \
+			VK_IMPORT_DEVICE_FUNC(false, vkCmdFillBuffer);                 \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdClearDepthStencilImage);     \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdClearAttachments);           \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdResolveImage);               \
@@ -366,7 +367,9 @@ VK_DESTROY_FUNC(SurfaceKHR);
 		void create(uint32_t _size, uint32_t _count);
 		void destroy();
 		void reset();
-		uint32_t write(const void* _data, uint32_t _size);
+		/// Copies _size bytes and zero-fills up to _range, the bytes a descriptor will read.
+		/// UINT32_MAX when the frame has run out of room; the next reset grows the buffer.
+		uint32_t write(const void* _data, uint32_t _size, uint32_t _range = 0);
 		void flush();
 
 		VkBuffer m_buffer;
@@ -374,6 +377,7 @@ VK_DESTROY_FUNC(SurfaceKHR);
 		uint8_t* m_data;
 		uint32_t m_size;
 		uint32_t m_pos;
+		uint64_t m_want; //!< Bytes this frame asked for, written or not.
 	};
 
 	struct BufferVK
@@ -464,6 +468,7 @@ VK_DESTROY_FUNC(SurfaceKHR);
 		uint32_t m_frame;        //!< Frame this slice was last claimed in.
 		uint32_t m_scratchFrame; //!< Frame m_scratchOffset belongs to.
 		uint32_t m_scratchOffset;
+		uint32_t m_scratchRange; //!< Bytes reserved at m_scratchOffset.
 	};
 
 	struct NativeVkUse
@@ -508,6 +513,8 @@ VK_DESTROY_FUNC(SurfaceKHR);
 	constexpr uint32_t kMaxNativeVkResources = 48;
 	constexpr uint32_t kMaxNativeVkSamplers  = 32;
 	constexpr uint32_t kMaxNativeVkImages    = 64;
+	/// Octarine: the largest constant buffer a shipped shader can declare, D3D11's 4096 registers.
+	constexpr uint32_t kMaxNativeVkCBufferSize = 64<<10;
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 	struct ShaderVK

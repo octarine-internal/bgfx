@@ -1062,6 +1062,9 @@ VK_IMPORT_DEVICE
 			break;
 
 		case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+			// Octarine: leaving present layout follows whatever the waited semaphore ordered
+			// before it, which only a first scope of every stage chains with
+			srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 			break;
 
 		default:
@@ -1564,6 +1567,17 @@ VK_IMPORT_INSTANCE
  
 				bx::memCopy(&s_extension[0], &physicalDeviceExtensions[physicalDeviceIdx][0], sizeof(s_extension) );
 
+				if (VK_NULL_HANDLE != m_device)
+				{
+					// Octarine: an adopted device has only the extensions its creator enabled, which
+					// cannot be asked, so nothing that needs a device extension enabled is used on it
+					s_extension[Extension::EXT_conservative_rasterization ].m_supported = false;
+					s_extension[Extension::EXT_line_rasterization         ].m_supported = false;
+					s_extension[Extension::EXT_shader_viewport_index_layer].m_supported = false;
+					s_extension[Extension::EXT_custom_border_color        ].m_supported = false;
+					s_extension[Extension::EXT_robustness2                ].m_supported = false;
+				}
+
 				vkGetPhysicalDeviceProperties(m_physicalDevice, &m_deviceProperties);
 				g_caps.vendorId = uint16_t(m_deviceProperties.vendorID);
 				g_caps.deviceId = uint16_t(m_deviceProperties.deviceID);
@@ -1878,6 +1892,13 @@ VK_IMPORT_INSTANCE
 					}
 				}
 
+				// Octarine: an adopted queue's command pools have to come from its own family
+				if (NULL != ctx
+				&&  ctx->queueFamily < queueFamilyPropertyCount)
+				{
+					m_globalQueueFamily = ctx->queueFamily;
+				}
+
 				BX_FREE(g_allocator, queueFamilyPropertices);
 
 				if (UINT32_MAX == m_globalQueueFamily)
@@ -2078,6 +2099,13 @@ VK_IMPORT_DEVICE
 				}
 			}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			if (!m_nativeNullDescriptor)
+			{
+				createNativeStandIns(m_commandBuffer);
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+
 			errorState = ErrorState::DescriptorCreated;
 
 			if (NULL == vkSetDebugUtilsObjectNameEXT)
@@ -2151,11 +2179,27 @@ VK_IMPORT_DEVICE
 				BX_FALLTHROUGH;
 
 			case ErrorState::CommandQueueCreated:
+				// Octarine: what the back buffer cached, its render pass above all, released
+				// through the queue's shutdown below; on an adopted device every failed init would
+				// otherwise leave one behind for good
+				m_pipelineStateCache.invalidate();
+				m_descriptorSetLayoutCache.invalidate();
+				m_renderPassCache.invalidate();
+				m_samplerCache.invalidate();
+				m_samplerBorderColorCache.invalidate();
+				m_imageViewCache.invalidate();
 				m_cmd.shutdown();
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+				destroyNativeStandIns();
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 				BX_FALLTHROUGH;
 
 			case ErrorState::DeviceCreated:
-				vkDestroyDevice(m_device, m_allocatorCb);
+				// Octarine: an adopted device and instance belong to their creator
+				if (NULL == g_platformData.context)
+				{
+					vkDestroyDevice(m_device, m_allocatorCb);
+				}
 				BX_FALLTHROUGH;
 
 			case ErrorState::InstanceCreated:
@@ -2164,7 +2208,10 @@ VK_IMPORT_DEVICE
 					vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, m_allocatorCb);
 				}
 
-				vkDestroyInstance(m_instance, m_allocatorCb);
+				if (NULL == g_platformData.context)
+				{
+					vkDestroyInstance(m_instance, m_allocatorCb);
+				}
 				BX_FALLTHROUGH;
 
 			case ErrorState::LoadedVulkan1:
@@ -2183,7 +2230,18 @@ VK_IMPORT_DEVICE
 
 		void shutdown()
 		{
-			VK_CHECK(vkDeviceWaitIdle(m_device) );
+			if (NULL == g_platformData.context)
+			{
+				VK_CHECK(vkDeviceWaitIdle(m_device) );
+			}
+			else
+			{
+				// Octarine: an adopted device is shared with its creator, whose other queues cannot
+				// be idled from here. The shared one can: shutdown runs inside the embedder's present
+				// or device destruction, where it is not in use elsewhere, and idling it also retires
+				// the presents still waiting on semaphores destroyed below
+				VK_CHECK(vkQueueWaitIdle(m_globalQueue) );
+			}
 
 			if (m_timerQuerySupport)
 			{
@@ -2233,6 +2291,10 @@ VK_IMPORT_DEVICE
 			m_backBuffer.destroy();
 
 			m_cmd.shutdown();
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			destroyNativeStandIns();
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 			vkDestroy(m_pipelineCache);
 
@@ -2505,19 +2567,186 @@ VK_IMPORT_DEVICE
 			return m_nativeCBufferSet;
 		}
 
-		/// Octarine: where in the frame's scratch buffer one native constant buffer's bytes for
-		/// this draw live, copying them there if they are not yet.
-		uint32_t nativeCBufferOffset(NativeVkCBuffer& _cbuffer, bool _fragment, uint32_t _set
-			, ScratchBufferVK& _scratchBuffer)
+		/// Octarine: records the stand-ins' creation and zero fill into _commandBuffer. Nothing is
+		/// recorded unless every object was created, so a failure can destroy them on the spot.
+		void createNativeStandIns(VkCommandBuffer _commandBuffer)
 		{
-			static const uint8_t s_zero[64<<10] = {};
-			const uint32_t size = bx::min<uint32_t>( (_cbuffer.m_size + 0xf) & ~0xf, sizeof(s_zero) );
+			for (uint32_t ii = 0; ii < BX_COUNTOF(m_nativeStandInImage); ++ii)
+			{
+				VkImageCreateInfo ici;
+				ici.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+				ici.pNext                 = NULL;
+				ici.flags                 = 0 == ii ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+				ici.imageType             = 0 == ii ? VK_IMAGE_TYPE_2D : VK_IMAGE_TYPE_3D;
+				ici.format                = VK_FORMAT_R8G8B8A8_UNORM;
+				ici.extent                = { 1, 1, 1 };
+				ici.mipLevels             = 1;
+				ici.arrayLayers           = 0 == ii ? 6 : 1;
+				ici.samples               = VK_SAMPLE_COUNT_1_BIT;
+				ici.tiling                = VK_IMAGE_TILING_OPTIMAL;
+				ici.usage                 = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+				ici.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+				ici.queueFamilyIndexCount = 0;
+				ici.pQueueFamilyIndices   = NULL;
+				ici.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
+
+				VkMemoryRequirements mr;
+
+				if (VK_SUCCESS != vkCreateImage(m_device, &ici, m_allocatorCb, &m_nativeStandInImage[ii]) )
+				{
+					m_nativeStandInImage[ii] = VK_NULL_HANDLE;
+					destroyNativeStandIns();
+					return;
+				}
+
+				vkGetImageMemoryRequirements(m_device, m_nativeStandInImage[ii], &mr);
+
+				if (VK_SUCCESS != allocateMemory(&mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &m_nativeStandInImageMem[ii])
+				||  VK_SUCCESS != vkBindImageMemory(m_device, m_nativeStandInImage[ii], m_nativeStandInImageMem[ii], 0) )
+				{
+					destroyNativeStandIns();
+					return;
+				}
+			}
+
+			{
+				VkBufferCreateInfo bci;
+				bci.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+				bci.pNext                 = NULL;
+				bci.flags                 = 0;
+				bci.size                  = 256;
+				bci.usage                 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				bci.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+				bci.queueFamilyIndexCount = 0;
+				bci.pQueueFamilyIndices   = NULL;
+
+				VkMemoryRequirements mr;
+
+				if (VK_SUCCESS != vkCreateBuffer(m_device, &bci, m_allocatorCb, &m_nativeStandInBuffer) )
+				{
+					m_nativeStandInBuffer = VK_NULL_HANDLE;
+					destroyNativeStandIns();
+					return;
+				}
+
+				vkGetBufferMemoryRequirements(m_device, m_nativeStandInBuffer, &mr);
+
+				if (VK_SUCCESS != allocateMemory(&mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &m_nativeStandInBufferMem)
+				||  VK_SUCCESS != vkBindBufferMemory(m_device, m_nativeStandInBuffer, m_nativeStandInBufferMem, 0) )
+				{
+					destroyNativeStandIns();
+					return;
+				}
+			}
+
+			const VkClearColorValue clear = {};
+			const VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+
+			for (::VkImage image : m_nativeStandInImage)
+			{
+				setImageMemoryBarrier(_commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT
+					, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+				vkCmdClearColorImage(_commandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
+				setImageMemoryBarrier(_commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT
+					, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			}
+
+			// the barrier every submit opens with orders this before the first draw reading it
+			vkCmdFillBuffer(_commandBuffer, m_nativeStandInBuffer, 0, VK_WHOLE_SIZE, 0);
+		}
+
+		/// Octarine: every stand-in, immediately; nothing may still be executing against them.
+		void destroyNativeStandIns()
+		{
+			for (::VkImageView& view : m_nativeStandInView)
+			{
+				if (VK_NULL_HANDLE != view)
+				{
+					vkDestroyImageView(m_device, view, m_allocatorCb);
+					view = VK_NULL_HANDLE;
+				}
+			}
+
+			for (uint32_t ii = 0; ii < BX_COUNTOF(m_nativeStandInImage); ++ii)
+			{
+				if (VK_NULL_HANDLE != m_nativeStandInImage[ii])
+				{
+					vkDestroyImage(m_device, m_nativeStandInImage[ii], m_allocatorCb);
+					m_nativeStandInImage[ii] = VK_NULL_HANDLE;
+				}
+
+				if (VK_NULL_HANDLE != m_nativeStandInImageMem[ii])
+				{
+					vkFreeMemory(m_device, m_nativeStandInImageMem[ii], m_allocatorCb);
+					m_nativeStandInImageMem[ii] = VK_NULL_HANDLE;
+				}
+			}
+
+			if (VK_NULL_HANDLE != m_nativeStandInBuffer)
+			{
+				vkDestroyBuffer(m_device, m_nativeStandInBuffer, m_allocatorCb);
+				m_nativeStandInBuffer = VK_NULL_HANDLE;
+			}
+
+			if (VK_NULL_HANDLE != m_nativeStandInBufferMem)
+			{
+				vkFreeMemory(m_device, m_nativeStandInBufferMem, m_allocatorCb);
+				m_nativeStandInBufferMem = VK_NULL_HANDLE;
+			}
+		}
+
+		/// Octarine: the zero stand-in read as _type; a type the stand-ins cannot take reads as 2D.
+		::VkImageView nativeStandInView(VkImageViewType _type)
+		{
+			const VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D_ARRAY   == _type
+				|| VK_IMAGE_VIEW_TYPE_CUBE       == _type
+				|| VK_IMAGE_VIEW_TYPE_CUBE_ARRAY == _type
+				|| VK_IMAGE_VIEW_TYPE_3D         == _type
+				? _type
+				: VK_IMAGE_VIEW_TYPE_2D
+				;
+
+			::VkImageView& view = m_nativeStandInView[type];
+			const ::VkImage image = m_nativeStandInImage[VK_IMAGE_VIEW_TYPE_3D == type ? 1 : 0];
+
+			if (VK_NULL_HANDLE == view
+			&&  VK_NULL_HANDLE != image)
+			{
+				const bool cube = VK_IMAGE_VIEW_TYPE_CUBE == type || VK_IMAGE_VIEW_TYPE_CUBE_ARRAY == type;
+
+				VkImageViewCreateInfo ivci;
+				ivci.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+				ivci.pNext            = NULL;
+				ivci.flags            = 0;
+				ivci.image            = image;
+				ivci.viewType         = type;
+				ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+				ivci.components       = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+				ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, cube ? 6u : 1u };
+
+				if (VK_SUCCESS != vkCreateImageView(m_device, &ivci, m_allocatorCb, &view) )
+				{
+					view = VK_NULL_HANDLE;
+				}
+			}
+
+			return view;
+		}
+
+		/// Octarine: where in the frame's scratch buffer one native constant buffer's bytes for
+		/// this draw live, copying them there if they are not yet. _range is what the descriptor
+		/// reads, the larger of the two stages' declarations. UINT32_MAX when the buffer is full.
+		uint32_t nativeCBufferOffset(NativeVkCBuffer& _cbuffer, bool _fragment, uint32_t _set
+			, uint32_t _range, ScratchBufferVK& _scratchBuffer)
+		{
+			const uint32_t size = (_cbuffer.m_size + 0xf) & ~0xf;
 
 			if (UINT32_MAX != _cbuffer.m_scratchOffset)
 			{
 				const uint8_t* scratch = _fragment ? m_fsScratch : m_vsScratch;
-				const uint32_t avail = uint32_t(sizeof(m_vsScratch) ) - bx::min<uint32_t>(_cbuffer.m_scratchOffset, sizeof(m_vsScratch) );
-				return _scratchBuffer.write(scratch + _cbuffer.m_scratchOffset, bx::min(size, avail) );
+				const uint32_t start = bx::min<uint32_t>(_cbuffer.m_scratchOffset, sizeof(m_vsScratch) );
+				const uint32_t avail = uint32_t(sizeof(m_vsScratch) ) - start;
+				return _scratchBuffer.write(scratch + start, bx::min(size, avail), _range);
 			}
 
 			NativeVkSlice* slice = NULL;
@@ -2545,13 +2774,22 @@ VK_IMPORT_DEVICE
 			if (NULL == slice
 			||  NULL == slice->m_data)
 			{
-				return _scratchBuffer.write(s_zero, size);
+				return _scratchBuffer.write(NULL, 0, _range);
 			}
 
-			if (slice->m_scratchFrame != m_nativeCBufferFrame)
+			if (slice->m_scratchFrame != m_nativeCBufferFrame
+			||  slice->m_scratchRange < _range)
 			{
-				slice->m_scratchOffset = _scratchBuffer.write(slice->m_data, size);
+				const uint32_t offset = _scratchBuffer.write(slice->m_data, size, _range);
+
+				if (UINT32_MAX == offset)
+				{
+					return UINT32_MAX;
+				}
+
+				slice->m_scratchOffset = offset;
 				slice->m_scratchFrame  = m_nativeCBufferFrame;
+				slice->m_scratchRange  = bx::max(size, _range);
 			}
 
 			return slice->m_scratchOffset;
@@ -2568,36 +2806,21 @@ VK_IMPORT_DEVICE
 
 			const Binding* bind = _stage < BGFX_CONFIG_MAX_TEXTURE_SAMPLERS ? &_renderBind.m_bind[_stage] : NULL;
 
-			// without nullDescriptor something valid has to go in, and a texture the draw does
-			// bind is the one thing certain to be; the shader never reads an index nobody wrote
+			// unbound reads zero, as it does on D3D11: a null descriptor where the device allows
+			// one, otherwise the stand-in through the view type the shader reads
 			if (NULL == bind
 			||  kInvalidHandle == bind->m_idx
 			||  (Binding::Texture != bind->m_type && Binding::Image != bind->m_type) )
 			{
-				if (m_nativeNullDescriptor)
+				if (!m_nativeNullDescriptor)
 				{
-					return info;
+					info.imageView = nativeStandInView(UINT8_MAX == _viewType
+						? VK_IMAGE_VIEW_TYPE_2D
+						: VkImageViewType(_viewType)
+						);
 				}
 
-				bind = NULL;
-
-				for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_TEXTURE_SAMPLERS; ++ii)
-				{
-					const Binding& other = _renderBind.m_bind[ii];
-
-					if (kInvalidHandle != other.m_idx
-					&&  Binding::Texture == other.m_type)
-					{
-						bind = &other;
-						_viewType = UINT8_MAX;
-						break;
-					}
-				}
-
-				if (NULL == bind)
-				{
-					return info;
-				}
+				return info;
 			}
 
 			const TextureVK& texture = m_textures[bind->m_idx];
@@ -2768,9 +2991,20 @@ VK_IMPORT_DEVICE
 						// THE EMULATED HEAP: slot k is whatever the draw has at bind stage k
 						const uint32_t count = bx::min<uint32_t>(resource.m_count, kMaxNativeVkImages);
 
+						if (imageCount + count > kMaxImages)
+						{
+							return VK_NULL_HANDLE;
+						}
+
 						for (uint32_t kk = 0; kk < count; ++kk)
 						{
 							imageInfo[imageCount + kk] = nativeImageInfo(_renderBind, kk, viewTypes[kk]);
+
+							if (VK_NULL_HANDLE == imageInfo[imageCount + kk].imageView
+							&&  !m_nativeNullDescriptor)
+							{
+								return VK_NULL_HANDLE;
+							}
 						}
 
 						begin(resource.m_binding, type, count).pImageInfo = &imageInfo[imageCount];
@@ -2778,9 +3012,19 @@ VK_IMPORT_DEVICE
 						continue;
 					}
 
+					if (imageCount == kMaxImages)
+					{
+						return VK_NULL_HANDLE;
+					}
+
 					if (2 == resource.m_source)
 					{
 						const uint32_t count = bx::min<uint32_t>(resource.m_count, kMaxNativeVkSamplers);
+
+						if (imageCount + count > kMaxImages)
+						{
+							return VK_NULL_HANDLE;
+						}
 
 						for (uint32_t kk = 0; kk < count; ++kk)
 						{
@@ -2802,6 +3046,13 @@ VK_IMPORT_DEVICE
 					{
 					case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
 						imageInfo[imageCount] = nativeImageInfo(_renderBind, resource.m_stage, UINT8_MAX);
+
+						if (VK_NULL_HANDLE == imageInfo[imageCount].imageView
+						&&  !m_nativeNullDescriptor)
+						{
+							return VK_NULL_HANDLE;
+						}
+
 						begin(resource.m_binding, type, 1).pImageInfo = &imageInfo[imageCount];
 						++imageCount;
 						break;
@@ -2850,8 +3101,12 @@ VK_IMPORT_DEVICE
 							if (VK_NULL_HANDLE == info.buffer
 							&&  !m_nativeNullDescriptor)
 							{
-								// nothing valid to put there; the binding stays unwritten
-								break;
+								if (VK_NULL_HANDLE == m_nativeStandInBuffer)
+								{
+									return VK_NULL_HANDLE;
+								}
+
+								info.buffer = m_nativeStandInBuffer;
 							}
 
 							begin(resource.m_binding, type, 1).pBufferInfo = &info;
@@ -3216,6 +3471,12 @@ VK_IMPORT_DEVICE
 
 			ScratchBufferVK& scratchBuffer = m_scratchBuffer[m_cmd.m_currentFrameInFlight];
 			const uint32_t bufferOffset = scratchBuffer.write(m_vsScratch, program.m_vsh->m_size);
+
+			if (UINT32_MAX == bufferOffset)
+			{
+				m_blitDescriptorSet = VK_NULL_HANDLE;
+				return;
+			}
 
 			const TextureVK& texture = m_textures[_blitter.m_texture.idx];
 
@@ -5114,6 +5375,14 @@ VK_IMPORT_DEVICE
 		/// Octarine: the same two counters the D3D11 flavour keeps; see its comments.
 		uint32_t m_nativeCBufferFrame = 1;
 		uint32_t m_nativeCBufferSet = 0;
+		/// Octarine: zero-filled stand-ins for an unbound native resource where nullDescriptor is
+		/// off: a cube compatible 2D image of six layers, a 3D image, the views read through them
+		/// by VkImageViewType, and a storage buffer.
+		::VkImage        m_nativeStandInImage[2] = {};
+		::VkDeviceMemory m_nativeStandInImageMem[2] = {};
+		::VkImageView    m_nativeStandInView[VK_IMAGE_VIEW_TYPE_CUBE_ARRAY + 1] = {};
+		::VkBuffer       m_nativeStandInBuffer = VK_NULL_HANDLE;
+		::VkDeviceMemory m_nativeStandInBufferMem = VK_NULL_HANDLE;
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		bool m_timerQuerySupport;
 
@@ -5287,6 +5556,7 @@ VK_DESTROY
 
 		m_size = (uint32_t)mr.size;
 		m_pos  = 0;
+		m_want = 0;
 
 		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem, 0) );
 
@@ -5295,7 +5565,8 @@ VK_DESTROY
 
 	void ScratchBufferVK::destroy()
 	{
-		reset();
+		m_pos  = 0;
+		m_want = 0;
 
 		vkUnmapMemory(s_renderVK->m_device, m_deviceMem);
 
@@ -5305,25 +5576,62 @@ VK_DESTROY
 
 	void ScratchBufferVK::reset()
 	{
-		m_pos = 0;
+		// Octarine: a frame that ran out of room dropped what did not fit, and its successor gets
+		// a buffer that holds it. This slot's last frame has retired by now, and the old buffer
+		// is only released once nothing can reference it.
+		if (m_want > m_size)
+		{
+			constexpr uint64_t kMaxSize = UINT64_C(256)<<20;
+
+			uint64_t size = m_size;
+
+			while (size < m_want
+			&&     size < kMaxSize)
+			{
+				size *= 2;
+			}
+
+			destroy();
+			create(uint32_t(bx::min(size, kMaxSize) ), 1);
+		}
+
+		m_pos  = 0;
+		m_want = 0;
 	}
 
-	uint32_t ScratchBufferVK::write(const void* _data, uint32_t _size)
+	uint32_t ScratchBufferVK::write(const void* _data, uint32_t _size, uint32_t _range)
 	{
-		BX_ASSERT(m_pos < m_size, "Out of scratch buffer memory");
+		const uint32_t range = bx::max(_size, _range);
+
+		if (0 == range)
+		{
+			return m_pos;
+		}
+
+		const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
+		const uint32_t align = uint32_t(deviceLimits.minUniformBufferOffsetAlignment);
+		const uint32_t alignedSize = bx::strideAlign(range, align);
+
+		m_want += alignedSize;
+
+		if (alignedSize > m_size - m_pos)
+		{
+			return UINT32_MAX;
+		}
 
 		const uint32_t offset = m_pos;
 
-		if (_size > 0)
+		if (0 < _size)
 		{
-			bx::memCopy(&m_data[m_pos], _data, _size);
-
-			const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
-			const uint32_t align = uint32_t(deviceLimits.minUniformBufferOffsetAlignment);
-			const uint32_t alignedSize = bx::strideAlign(_size, align);
-
-			m_pos += alignedSize;
+			bx::memCopy(&m_data[offset], _data, _size);
 		}
+
+		if (range > _size)
+		{
+			bx::memSet(&m_data[offset + _size], 0, range - _size);
+		}
+
+		m_pos += alignedSize;
 
 		return offset;
 	}
@@ -5766,6 +6074,7 @@ VK_DESTROY
 				bx::read(&reader, cbuffer.m_binding, &err);
 				bx::read(&reader, cbuffer.m_scratchOffset, &err);
 				bx::read(&reader, cbuffer.m_size, &err);
+				cbuffer.m_size = bx::min(cbuffer.m_size, kMaxNativeVkCBufferSize);
 			}
 
 			m_numNativeCBuffers = numCBuffers;
@@ -7752,30 +8061,64 @@ VK_DESTROY
 
 		const VkColorSpaceKHR surfaceColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 
-		const bool srgb = !!(m_resolution.reset & BGFX_RESET_SRGB_BACKBUFFER);
-		m_colorFormat = findSurfaceFormat(m_resolution.format, surfaceColorSpace, srgb);
+		const VkContext* ctx = (const VkContext*)g_platformData.context;
+		VkFormat surfaceFormat = VK_FORMAT_UNDEFINED;
 
-		if (TextureFormat::Count == m_colorFormat)
+		// Octarine: an adopted swapchain's images are viewed in the format they were created
+		// with; only a format nobody named is picked from the surface
+		if (NULL != ctx
+		&&  0 != ctx->swapchainFormat)
 		{
-			BX_TRACE("Create swapchain error: Unable to find surface format (srgb: %d).", srgb);
-			return VK_ERROR_INITIALIZATION_FAILED;
+			surfaceFormat = VkFormat(ctx->swapchainFormat);
+			m_colorFormat = TextureFormat::BGRA8;
+
+			for (uint32_t ii = 0; ii < TextureFormat::Count; ++ii)
+			{
+				if (surfaceFormat == s_textureFormat[ii].m_fmt
+				||  surfaceFormat == s_textureFormat[ii].m_fmtSrgb)
+				{
+					m_colorFormat = TextureFormat::Enum(ii);
+					break;
+				}
+			}
+		}
+		else
+		{
+			const bool srgb = !!(m_resolution.reset & BGFX_RESET_SRGB_BACKBUFFER);
+			m_colorFormat = findSurfaceFormat(m_resolution.format, surfaceColorSpace, srgb);
+
+			if (TextureFormat::Count == m_colorFormat)
+			{
+				BX_TRACE("Create swapchain error: Unable to find surface format (srgb: %d).", srgb);
+				return VK_ERROR_INITIALIZATION_FAILED;
+			}
+
+			surfaceFormat = srgb
+				? s_textureFormat[m_colorFormat].m_fmtSrgb
+				: s_textureFormat[m_colorFormat].m_fmt
+				;
 		}
 
-		const VkFormat surfaceFormat = srgb
-			? s_textureFormat[m_colorFormat].m_fmtSrgb
-			: s_textureFormat[m_colorFormat].m_fmt
-			;
-
-		const uint32_t width = bx::clamp<uint32_t>(
+		uint32_t width = bx::clamp<uint32_t>(
 			  m_resolution.width
 			, surfaceCapabilities.minImageExtent.width
 			, surfaceCapabilities.maxImageExtent.width
 			);
-		const uint32_t height = bx::clamp<uint32_t>(
+		uint32_t height = bx::clamp<uint32_t>(
 			  m_resolution.height
 			, surfaceCapabilities.minImageExtent.height
 			, surfaceCapabilities.maxImageExtent.height
 			);
+
+		// Octarine: an adopted swapchain keeps the extent it was created with, whatever the
+		// window measures now
+		if (NULL != ctx
+		&&  0 != ctx->swapchainWidth
+		&&  0 != ctx->swapchainHeight)
+		{
+			width  = ctx->swapchainWidth;
+			height = ctx->swapchainHeight;
+		}
 
 		VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 
@@ -7821,10 +8164,10 @@ VK_DESTROY
 		m_sci.presentMode        = s_presentMode[presentModeIdx].mode;
 		m_sci.clipped            = VK_FALSE;
 
-		if (g_platformData.context != NULL) {
-			auto ctx = (VkContext*)g_platformData.context;
+		if (NULL != ctx)
+		{
 			m_swapchain = (::VkSwapchainKHR)ctx->swapchain;
-			ctx->swapchainFormat = (uint32_t)m_sci.imageFormat;
+			((VkContext*)g_platformData.context)->swapchainFormat = (uint32_t)m_sci.imageFormat;
 		}
 		result = m_swapchain != NULL ? VK_SUCCESS : vkCreateSwapchainKHR(device, &m_sci, allocatorCb, &m_swapchain);
 		if (VK_SUCCESS != result)
@@ -8232,20 +8575,39 @@ VK_DESTROY
 		{
 			const VkDevice device = s_renderVK->m_device;
 
-			m_lastImageAcquiredSemaphore = m_presentDoneSemaphore[m_currentSemaphore];
-			m_lastImageRenderedSemaphore = m_renderDoneSemaphore[m_currentSemaphore];
-			m_currentSemaphore = (m_currentSemaphore + 1) % m_numSwapchainImages;
+			VkResult result = VK_SUCCESS;
 
-			if (g_platformData.context != NULL)
-				m_backBufferColorIdx = ((VkContext*)g_platformData.context)->currentImageIndex;
-			VkResult result = g_platformData.context != NULL ? VK_SUCCESS : vkAcquireNextImageKHR(
-				  device
-				, m_swapchain
-				, UINT64_MAX
-				, m_lastImageAcquiredSemaphore
-				, VK_NULL_HANDLE
-				, &m_backBufferColorIdx
-				);
+			if (NULL != g_platformData.context)
+			{
+				// Octarine: the embedder acquired the image and presents it; the frame waits on the
+				// present's semaphores rather than an acquire, and its render-done semaphore is
+				// per image, so one is only signalled again once that image was re-acquired, which
+				// the present waiting on it had to finish first
+				m_backBufferColorIdx = ( (const VkContext*)g_platformData.context)->currentImageIndex;
+
+				if (m_backBufferColorIdx >= m_numSwapchainImages)
+				{
+					return false;
+				}
+
+				m_lastImageAcquiredSemaphore = VK_NULL_HANDLE;
+				m_lastImageRenderedSemaphore = m_renderDoneSemaphore[m_backBufferColorIdx];
+			}
+			else
+			{
+				m_lastImageAcquiredSemaphore = m_presentDoneSemaphore[m_currentSemaphore];
+				m_lastImageRenderedSemaphore = m_renderDoneSemaphore[m_currentSemaphore];
+				m_currentSemaphore = (m_currentSemaphore + 1) % m_numSwapchainImages;
+
+				result = vkAcquireNextImageKHR(
+					  device
+					, m_swapchain
+					, UINT64_MAX
+					, m_lastImageAcquiredSemaphore
+					, VK_NULL_HANDLE
+					, &m_backBufferColorIdx
+					);
+			}
 
 			switch (result)
 			{
@@ -8333,7 +8695,14 @@ VK_DESTROY
 			: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 			;
 
-		layout = toPresent ? layout : VK_IMAGE_LAYOUT_UNDEFINED;
+		// Octarine: an adopted image holds the embedder's frame, in the layout it is presented
+		// in; leaving UNDEFINED would let the driver discard it
+		const VkImageLayout acquiredLayout = NULL != g_platformData.context
+			? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+			: VK_IMAGE_LAYOUT_UNDEFINED
+			;
+
+		layout = toPresent ? layout : acquiredLayout;
 
 		setImageMemoryBarrier(
 			  _commandBuffer
@@ -9273,6 +9642,12 @@ VK_DESTROY
 							{
 								offset = scratchBuffer.write(m_vsScratch, vsize);
 								++numOffset;
+
+								// Octarine: no room left this frame; the dispatch is dropped
+								if (UINT32_MAX == offset)
+								{
+									continue;
+								}
 							}
 						}
 
@@ -9286,8 +9661,6 @@ VK_DESTROY
 
 						if (currentBindHash != bindHash)
 						{
-							currentBindHash = bindHash;
-
 							currentDescriptorSet = getDescriptorSet(
 								  program
 								, renderBind
@@ -9295,10 +9668,14 @@ VK_DESTROY
 								, _render->m_colorPalette
 							);
 
+							// Octarine: a set that could not be had drops this dispatch, not the frame
 							if (VK_NULL_HANDLE == currentDescriptorSet)
 							{
-								break;
+								currentBindHash = 0;
+								continue;
 							}
+
+							currentBindHash = bindHash;
 							descriptorSetCount++;
 						}
 
@@ -9605,6 +9982,7 @@ VK_DESTROY
 						// and the offsets go in binding order
 						struct { uint16_t binding; uint32_t offset; } dynamic[2 * kMaxNativeVkCBuffers];
 						uint32_t numDynamic = 0;
+						bool outOfScratch = false;
 
 						for (uint32_t ss = 0; ss < 2; ++ss)
 						{
@@ -9630,10 +10008,34 @@ VK_DESTROY
 									continue;
 								}
 
+								// both stages may declare one binding; the larger declaration
+								// feeds it, since the descriptor's range has to cover it
+								NativeVkCBuffer* source = &cbuffer;
+								bool sourceFragment = 1 == ss;
+								ShaderVK* other = 0 == ss ? const_cast<ShaderVK*>(program.m_fsh) : NULL;
+
+								for (uint8_t jj = 0; NULL != other && other->m_native && jj < other->m_numNativeCBuffers; ++jj)
+								{
+									if (other->m_nativeCBuffers[jj].m_binding == cbuffer.m_binding
+									&&  other->m_nativeCBuffers[jj].m_size > source->m_size)
+									{
+										source = &other->m_nativeCBuffers[jj];
+										sourceFragment = true;
+									}
+								}
+
 								dynamic[numDynamic].binding = cbuffer.m_binding;
-								dynamic[numDynamic].offset  = nativeCBufferOffset(cbuffer, 1 == ss, draw.m_nativeCBufferSet, scratchBuffer);
+								dynamic[numDynamic].offset  = nativeCBufferOffset(*source, sourceFragment
+									, draw.m_nativeCBufferSet, (source->m_size + 0xf) & ~0xf, scratchBuffer);
+								outOfScratch = outOfScratch || UINT32_MAX == dynamic[numDynamic].offset;
 								++numDynamic;
 							}
+						}
+
+						// no room left this frame; the draw is dropped
+						if (outOfScratch)
+						{
+							continue;
 						}
 
 						for (uint32_t ii = 1; ii < numDynamic; ++ii)
@@ -9662,14 +10064,16 @@ VK_DESTROY
 
 						if (currentBindHash != bindHash)
 						{
-							currentBindHash = bindHash;
 							currentDescriptorSet = getNativeDescriptorSet(program, renderBind, scratchBuffer, _render->m_colorPalette);
 
+							// a set that could not be had drops this draw, not the frame
 							if (VK_NULL_HANDLE == currentDescriptorSet)
 							{
-								break;
+								currentBindHash = 0;
+								continue;
 							}
 
+							currentBindHash = bindHash;
 							descriptorSetCount++;
 						}
 
@@ -9705,6 +10109,13 @@ VK_DESTROY
 							{
 								offsets[numOffset++] = scratchBuffer.write(m_fsScratch, fsize);
 							}
+
+							// Octarine: no room left this frame; the draw is dropped
+							if (UINT32_MAX == offsets[0]
+							||  UINT32_MAX == offsets[1])
+							{
+								continue;
+							}
 						}
 
 						bx::HashMurmur2A hash;
@@ -9717,8 +10128,6 @@ VK_DESTROY
 
 						if (currentBindHash != bindHash)
 						{
-							currentBindHash = bindHash;
-
 							currentDescriptorSet = getDescriptorSet(
 								  program
 								, renderBind
@@ -9726,10 +10135,14 @@ VK_DESTROY
 								, _render->m_colorPalette
 							);
 
+							// Octarine: a set that could not be had drops this draw, not the frame
 							if (VK_NULL_HANDLE == currentDescriptorSet)
 							{
-								break;
+								currentBindHash = 0;
+								continue;
 							}
+
+							currentBindHash = bindHash;
 							descriptorSetCount++;
 						}
 
@@ -10131,7 +10544,26 @@ VK_DESTROY
 
 				fb.m_swapChain.transitionImage(m_commandBuffer);
 
-				m_cmd.addWaitSemaphore(fb.m_swapChain.m_lastImageAcquiredSemaphore, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+				VkContext* ctx = (VkContext*)g_platformData.context;
+
+				if (NULL != ctx)
+				{
+					// Octarine: the embedder's frame is done once the semaphores its present was
+					// about to wait on signal; the present waits on this frame instead
+					for (uint32_t jj = 0; jj < ctx->waitSemaphoreCount; ++jj)
+					{
+						m_cmd.addWaitSemaphore( (::VkSemaphore)ctx->waitSemaphores[jj], VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+					}
+
+					ctx->waitSemaphores      = NULL;
+					ctx->waitSemaphoreCount  = 0;
+					ctx->renderDoneSemaphore = (void*)(::VkSemaphore)fb.m_swapChain.m_lastImageRenderedSemaphore;
+				}
+				else
+				{
+					m_cmd.addWaitSemaphore(fb.m_swapChain.m_lastImageAcquiredSemaphore, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+				}
+
 				m_cmd.addSignalSemaphore(fb.m_swapChain.m_lastImageRenderedSemaphore);
 				fb.m_swapChain.m_lastImageAcquiredSemaphore = VK_NULL_HANDLE;
 

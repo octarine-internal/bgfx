@@ -607,17 +607,32 @@ namespace bgfx
 	{
 	}
 
+	/// Octarine: the embedder's Vulkan objects the renderer adopts instead of creating its own.
 	struct VkContext {
 		void* instance = nullptr;
 		void* physicalDevice = nullptr;
 		void* device = nullptr;
 		void* queue = nullptr;
+		/// Family `queue` was created from. UINT32_MAX lets the renderer take the first family
+		/// with graphics and compute, the one it would create a queue from itself.
+		uint32_t queueFamily = UINT32_MAX;
 		void* swapchain = nullptr;
 		uint32_t currentImageIndex = 0;
-		/// VkFormat the renderer's image views over the adopted swapchain use, written back by
-		/// bgfx once the swapchain is wrapped. 0 until then. The embedder feeds it to the
-		/// backdrop capture so the copy-destination texture matches the real channel order.
+		/// VkFormat the renderer's image views over the adopted swapchain use: the swapchain's own
+		/// format, or a sibling its creator allowed with a mutable-format swapchain. 0 lets the
+		/// renderer pick from the surface, and the pick is written back.
 		uint32_t swapchainFormat = 0;
+		/// Extent the adopted swapchain was created with. 0 takes the surface's current extent.
+		uint32_t swapchainWidth = 0;
+		uint32_t swapchainHeight = 0;
+		/// Per frame, in: the VkSemaphores the embedder's present is about to wait on. A frame that
+		/// draws to the swapchain image waits on all of them first, and clears this list.
+		const void* const* waitSemaphores = nullptr;
+		uint32_t waitSemaphoreCount = 0;
+		/// Per frame, out: the VkSemaphore that frame signals once it is done with the image, which
+		/// the present has to wait on in place of waitSemaphores. Left untouched when no frame drew
+		/// to the image; the embedder resets it to null before each frame.
+		void* renderDoneSemaphore = nullptr;
 	};
 
 	/// Platform data.
