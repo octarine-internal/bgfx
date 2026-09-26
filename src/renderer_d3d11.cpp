@@ -2542,6 +2542,7 @@ namespace bgfx { namespace d3d11
 			m_rasterizerStateCache.invalidate();
 			m_samplerStateCache.invalidate();
 			m_srvUavLru.invalidate();
+			m_applied = AppliedState{};
 		}
 
 		void invalidateCompute()
@@ -2985,6 +2986,31 @@ namespace bgfx { namespace d3d11
 
 		void setInputLayout(uint8_t _numStreams, const VertexLayout** _layouts, const ProgramD3D11& _program, uint16_t _numInstanceData)
 		{
+			AppliedState& applied = m_applied;
+			bool same = applied.layoutKnown
+				&& applied.vertexShader == _program.m_vsh->m_hash
+				&& applied.instanceData == _numInstanceData
+				&& applied.numStreams   == _numStreams
+				;
+			for (uint8_t stream = 0; same && stream < _numStreams; ++stream)
+			{
+				same = applied.layouts[stream] == _layouts[stream]->m_hash;
+			}
+
+			if (same)
+			{
+				return;
+			}
+
+			applied.layoutKnown  = true;
+			applied.vertexShader = _program.m_vsh->m_hash;
+			applied.instanceData = _numInstanceData;
+			applied.numStreams   = _numStreams;
+			for (uint8_t stream = 0; stream < _numStreams; ++stream)
+			{
+				applied.layouts[stream] = _layouts[stream]->m_hash;
+			}
+
 			bx::HashMurmur2A murmur;
 			murmur.begin();
 			murmur.add(_numInstanceData);
@@ -3130,6 +3156,17 @@ namespace bgfx { namespace d3d11
 		{
 			_state &= BGFX_D3D11_BLEND_STATE_MASK;
 
+			if (m_applied.blendKnown
+			&&  m_applied.blend     == _state
+			&&  m_applied.blendRgba == _rgba)
+			{
+				return;
+			}
+
+			m_applied.blendKnown = true;
+			m_applied.blend      = _state;
+			m_applied.blendRgba  = _rgba;
+
 			bx::HashMurmur2A murmur;
 			murmur.begin();
 			murmur.add(_state);
@@ -3239,6 +3276,17 @@ namespace bgfx { namespace d3d11
 			uint32_t func = (_state&BGFX_STATE_DEPTH_TEST_MASK)>>BGFX_STATE_DEPTH_TEST_SHIFT;
 			_state &= 0 == func ? 0 : BGFX_D3D11_DEPTH_STENCIL_MASK;
 
+			if (m_applied.depthKnown
+			&&  m_applied.depth   == _state
+			&&  m_applied.stencil == _stencil)
+			{
+				return;
+			}
+
+			m_applied.depthKnown = true;
+			m_applied.depth      = _state;
+			m_applied.stencil    = _stencil;
+
 			uint32_t fstencil = unpackStencil(0, _stencil);
 			uint32_t ref = (fstencil&BGFX_STENCIL_FUNC_REF_MASK)>>BGFX_STENCIL_FUNC_REF_SHIFT;
 			_stencil &= packStencil(~BGFX_STENCIL_FUNC_REF_MASK, ~BGFX_STENCIL_FUNC_REF_MASK);
@@ -3288,6 +3336,7 @@ namespace bgfx { namespace d3d11
 			{
 				m_wireframe = _wireframe;
 				m_rasterizerStateCache.invalidate();
+				m_applied.rasterizerKnown = false;
 			}
 		}
 
@@ -3303,6 +3352,15 @@ namespace bgfx { namespace d3d11
 			_state |= _wireframe ? BGFX_STATE_PT_LINES : BGFX_STATE_NONE;
 			_state |= _scissor   ? BGFX_STATE_RESERVED_MASK : 0;
 			_state &= ~(m_deviceInterfaceVersion >= 3 ? 0 : BGFX_STATE_CONSERVATIVE_RASTER);
+
+			if (m_applied.rasterizerKnown
+			&&  m_applied.rasterizer == _state)
+			{
+				return;
+			}
+
+			m_applied.rasterizerKnown = true;
+			m_applied.rasterizer      = _state;
 
 			ID3D11RasterizerState* rs = m_rasterizerStateCache.find(_state);
 			if (NULL == rs)
@@ -3368,9 +3426,17 @@ namespace bgfx { namespace d3d11
 				_flags &= ~BGFX_SAMPLER_MIP_MASK;
 			}
 
+			const bool border = needBorderColor(_flags);
+			if (!border
+			&&  m_applied.samplerKnown
+			&&  m_applied.samplerFlags == _flags)
+			{
+				return m_applied.sampler;
+			}
+
 			uint32_t hash;
 			ID3D11SamplerState* sampler;
-			if (!needBorderColor(_flags) )
+			if (!border)
 			{
 				bx::HashMurmur2A murmur;
 				murmur.begin();
@@ -3434,6 +3500,13 @@ namespace bgfx { namespace d3d11
 				DX_CHECK_REFCOUNT(sampler, 1);
 
 				m_samplerStateCache.add(hash, sampler);
+			}
+
+			if (!border)
+			{
+				m_applied.samplerKnown = true;
+				m_applied.samplerFlags = _flags;
+				m_applied.sampler      = sampler;
 			}
 
 			return sampler;
@@ -4103,6 +4176,33 @@ namespace bgfx { namespace d3d11
 		/// bound, to clear it - instead of the whole BGFX_CONFIG_MAX_TEXTURE_SAMPLERS range.
 		uint32_t m_numBoundStages = BGFX_CONFIG_MAX_TEXTURE_SAMPLERS;
 		uint32_t m_numBoundUavs = BGFX_CONFIG_MAX_TEXTURE_SAMPLERS;
+
+		/// Octarine: what the state setters last put on the context, and the sampler the last lookup
+		/// found, so a draw asking for the state already bound costs a compare instead of a hash, a
+		/// cache lookup and a context call. A UI frame changes the scissor on nearly every draw,
+		/// which re-applied the same rasterizer state each time, and binds a vertex buffer of its
+		/// own per draw, which re-hashed the same input layout. Forgotten at the start of every
+		/// submit: the game draws on this context in between.
+		struct AppliedState
+		{
+			bool     rasterizerKnown = false;
+			uint64_t rasterizer      = 0;
+			bool     blendKnown      = false;
+			uint64_t blend           = 0;
+			uint32_t blendRgba       = 0;
+			bool     depthKnown      = false;
+			uint64_t depth           = 0;
+			uint64_t stencil         = 0;
+			bool     layoutKnown     = false;
+			uint32_t vertexShader    = 0;
+			uint16_t instanceData    = 0;
+			uint8_t  numStreams      = 0;
+			uint32_t layouts[BGFX_CONFIG_MAX_VERTEX_STREAMS] = {};
+			bool     samplerKnown    = false;
+			uint32_t samplerFlags    = 0;
+			ID3D11SamplerState* sampler = NULL;
+		};
+		AppliedState m_applied;
 
 		ProgramD3D11* m_currentProgram;
 
@@ -6269,6 +6369,8 @@ namespace bgfx { namespace d3d11
 
 		BGFX_D3D11_PROFILER_BEGIN_LITERAL("rendererSubmit", kColorView);
 
+		m_applied = AppliedState{};
+
 		ID3D11DeviceContext* deviceCtx = m_deviceCtx;
 
 		int64_t timeBegin = bx::getHPCounter();
@@ -7004,6 +7106,7 @@ namespace bgfx { namespace d3d11
 						else
 						{
 							deviceCtx->IASetInputLayout(NULL);
+							m_applied.layoutKnown = false;
 						}
 					}
 				}
