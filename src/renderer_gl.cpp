@@ -7568,6 +7568,11 @@ namespace bgfx { namespace gl
 			: GL_FILL
 			) );
 
+		// Octarine: a culled draw still applies the uniforms it carries, and the next drawn one
+		// commits them, so a value set once holds for every later draw whether or not the draw
+		// that set it was scissored away
+		bool pendingConstants = false;
+
 		bool wasCompute = false;
 		bool viewHasScissor = false;
 		Rect viewScissorRect;
@@ -7824,6 +7829,12 @@ namespace bgfx { namespace gl
 							currentState.clear();
 							currentState.m_scissor = !draw.m_scissor;
 							currentBind.clear();
+						}
+
+						if (draw.m_uniformBegin < draw.m_uniformEnd)
+						{
+							rendererUpdateUniforms(this, _render->m_uniformBuffer[draw.m_uniformIdx], draw.m_uniformBegin, draw.m_uniformEnd);
+							pendingConstants = true;
 						}
 
 						continue;
@@ -8178,7 +8189,8 @@ namespace bgfx { namespace gl
 				}
 
 				bool programChanged = false;
-				bool constantsChanged = draw.m_uniformBegin < draw.m_uniformEnd;
+				bool constantsChanged = pendingConstants || draw.m_uniformBegin < draw.m_uniformEnd;
+				pendingConstants = false;
 				bool bindAttribs = false;
 				rendererUpdateUniforms(this, _render->m_uniformBuffer[draw.m_uniformIdx], draw.m_uniformBegin, draw.m_uniformEnd);
 

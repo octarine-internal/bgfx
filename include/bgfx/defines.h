@@ -18,6 +18,7 @@
 #define BGFX_API_VERSION UINT32_C(115)
 
 #define BGFX_OCT_VIEWSTATS_FRAMENUM 1 //!< Octarine: `ViewStats::gpuFrameNum` names the frame each view's GPU time came from.
+#define BGFX_OCT_CULLED_UNIFORMS 1 //!< Octarine: a draw culled by its scissor still applies its uniforms, so a uniform set once holds for every later draw.
 
 /**
  * Color RGB/alpha/depth write. When it's not specified write will be disabled.

@@ -9023,6 +9023,10 @@ VK_DESTROY
 
 		ProgramHandle currentProgram = BGFX_INVALID_HANDLE;
 		bool hasPredefined = false;
+		// Octarine: a culled draw still applies the uniforms it carries, and the next drawn one
+		// commits them, so a value set once holds for every later draw whether or not the draw
+		// that set it was scissored away
+		bool pendingConstants = false;
 		VkPipeline currentPipeline = VK_NULL_HANDLE;
 		VkDescriptorSet currentDescriptorSet = VK_NULL_HANDLE;
 		uint32_t currentBindHash = 0;
@@ -9351,6 +9355,7 @@ VK_DESTROY
 					||  0 == draw.m_streamMask
 					||  _render->m_frameCache.isZeroArea(viewScissorRect, draw.m_scissor) )
 					{
+						pendingConstants = pendingConstants || draw.m_uniformBegin < draw.m_uniformEnd;
 						continue;
 					}
 				}
@@ -9460,6 +9465,7 @@ VK_DESTROY
 					if (VK_NULL_HANDLE == pipeline)
 					{
 						// nothing to draw with; binding a null pipeline faults in the driver
+						pendingConstants = pendingConstants || draw.m_uniformBegin < draw.m_uniformEnd;
 						continue;
 					}
 
@@ -9537,10 +9543,12 @@ VK_DESTROY
 					}
 
 					bool constantsChanged = false;
-					if (draw.m_uniformBegin < draw.m_uniformEnd
+					if (pendingConstants
+					||  draw.m_uniformBegin < draw.m_uniformEnd
 					||  currentProgram.idx != key.m_program.idx
 					||  BGFX_STATE_ALPHA_REF_MASK & changedFlags)
 					{
+						pendingConstants = false;
 						currentProgram = key.m_program;
 						ProgramVK& program = m_program[currentProgram.idx];
 

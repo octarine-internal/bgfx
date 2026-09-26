@@ -6293,6 +6293,11 @@ namespace bgfx { namespace d3d11
 		PrimInfo prim = s_primInfo[primIndex];
 		deviceCtx->IASetPrimitiveTopology(prim.m_type);
 
+		// Octarine: a culled draw still applies the uniforms it carries, and the next drawn one
+		// commits them, so a value set once holds for every later draw whether or not the draw
+		// that set it was scissored away
+		bool pendingConstants = false;
+
 		bool wasCompute = false;
 		bool viewHasScissor = false;
 		Rect viewScissorRect;
@@ -6588,6 +6593,12 @@ namespace bgfx { namespace d3d11
 							currentBind.clear();
 						}
 
+						if (draw.m_uniformBegin < draw.m_uniformEnd)
+						{
+							rendererUpdateUniforms(this, _render->m_uniformBuffer[draw.m_uniformIdx], draw.m_uniformBegin, draw.m_uniformEnd);
+							pendingConstants = true;
+						}
+
 						continue;
 					}
 				}
@@ -6710,7 +6721,8 @@ namespace bgfx { namespace d3d11
 				}
 
 				bool programChanged = false;
-				bool constantsChanged = draw.m_uniformBegin < draw.m_uniformEnd;
+				bool constantsChanged = pendingConstants || draw.m_uniformBegin < draw.m_uniformEnd;
+				pendingConstants = false;
 				rendererUpdateUniforms(this, _render->m_uniformBuffer[draw.m_uniformIdx], draw.m_uniformBegin, draw.m_uniformEnd);
 
 				if (key.m_program.idx != currentProgram.idx)
