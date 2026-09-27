@@ -3585,34 +3585,62 @@ namespace bgfx { namespace d3d11
 					bindNativeResources(m_currentProgram->m_fsh, true);
 				}
 
+				// a native shader binds at its own registers: what it left behind is not tracked
+				m_numBoundStages = maxTextureSamplers;
 				return;
 			}
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 			ID3D11DeviceContext* deviceCtx = m_deviceCtx;
 
-			// vertex texture fetch not supported on 9_1 through 9_3
-			if (m_featureLevel > D3D_FEATURE_LEVEL_9_3)
+			// Octarine: bind up to the last stage in use, or still bound from the last commit so it is
+			// cleared, rather than every stage there is on every texture change
+			uint32_t usedStages = maxTextureSamplers;
+			while (0 < usedStages
+			&&     NULL == m_textureStage.m_srv[usedStages - 1]
+			&&     NULL == m_textureStage.m_sampler[usedStages - 1])
 			{
-				deviceCtx->VSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-				deviceCtx->VSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
+				--usedStages;
+			}
+			uint32_t usedUavs = maxUavs;
+			while (0 < usedUavs
+			&&     NULL == m_textureStage.m_uav[usedUavs - 1])
+			{
+				--usedUavs;
+			}
+			const uint32_t numStages   = bx::max(usedStages, m_numBoundStages);
+			const uint32_t numSamplers = bx::min(numStages, maxSamplers);
+			const uint32_t numUavs     = bx::max(usedUavs, m_numBoundUavs);
+			m_numBoundStages = usedStages;
+			m_numBoundUavs   = usedUavs;
+
+			// vertex texture fetch not supported on 9_1 through 9_3
+			if (m_featureLevel > D3D_FEATURE_LEVEL_9_3
+			&&  0 < numStages)
+			{
+				deviceCtx->VSSetShaderResources(0, numStages, m_textureStage.m_srv);
+				deviceCtx->VSSetSamplers(0, numSamplers, m_textureStage.m_sampler);
 			}
 
-			if (m_featureLevel > D3D_FEATURE_LEVEL_11_0)
+			if (m_featureLevel > D3D_FEATURE_LEVEL_11_0
+			&&  0 < numUavs)
 			{
 				deviceCtx->OMSetRenderTargetsAndUnorderedAccessViews(
 					  D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL
 					, NULL
 					, NULL
 					, 16
-					, maxUavs
+					, numUavs
 					, m_textureStage.m_uav
 					, NULL
 					);
 			}
 
-			deviceCtx->PSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-			deviceCtx->PSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
+			if (0 < numStages)
+			{
+				deviceCtx->PSSetShaderResources(0, numStages, m_textureStage.m_srv);
+				deviceCtx->PSSetSamplers(0, numSamplers, m_textureStage.m_sampler);
+			}
 		}
 
 		void invalidateTextureStage()
@@ -4143,6 +4171,11 @@ namespace bgfx { namespace d3d11
 		TextVideoMem m_textVideoMem;
 
 		TextureStage m_textureStage;
+		/// Octarine: how many stages the last commitTextureStage left bound on the vertex and pixel
+		/// stages, and how many UAVs, so the next one binds up to the last stage in use - or still
+		/// bound, to clear it - instead of the whole BGFX_CONFIG_MAX_TEXTURE_SAMPLERS range.
+		uint32_t m_numBoundStages = BGFX_CONFIG_MAX_TEXTURE_SAMPLERS;
+		uint32_t m_numBoundUavs = BGFX_CONFIG_MAX_TEXTURE_SAMPLERS;
 
 		/// Octarine: what the state setters last put on the context, and the sampler the last lookup
 		/// found, so a draw asking for the state already bound costs a compare instead of a hash, a
