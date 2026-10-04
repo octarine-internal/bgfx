@@ -2152,6 +2152,7 @@ VK_IMPORT_DEVICE
 				goto error;
 			}
 
+			m_memoryCacheOn = true;
 			g_internalData.context = m_device;
 			return true;
 
@@ -2242,6 +2243,10 @@ VK_IMPORT_DEVICE
 				// the presents still waiting on semaphores destroyed below
 				VK_CHECK(vkQueueWaitIdle(m_globalQueue) );
 			}
+
+			// from here on every block goes straight back to the driver
+			m_memoryCacheOn = false;
+			trimMemoryCache(INT64_MAX, INT64_MAX);
 
 			if (m_timerQuerySupport)
 			{
@@ -2677,7 +2682,7 @@ VK_IMPORT_DEVICE
 
 				if (VK_NULL_HANDLE != m_nativeStandInImageMem[ii])
 				{
-					vkFreeMemory(m_device, m_nativeStandInImageMem[ii], m_allocatorCb);
+					freeMemory(m_nativeStandInImageMem[ii]);
 					m_nativeStandInImageMem[ii] = VK_NULL_HANDLE;
 				}
 			}
@@ -2690,7 +2695,7 @@ VK_IMPORT_DEVICE
 
 			if (VK_NULL_HANDLE != m_nativeStandInBufferMem)
 			{
-				vkFreeMemory(m_device, m_nativeStandInBufferMem, m_allocatorCb);
+				freeMemory(m_nativeStandInBufferMem);
 				m_nativeStandInBufferMem = VK_NULL_HANDLE;
 			}
 		}
@@ -5250,29 +5255,259 @@ VK_IMPORT_DEVICE
 
 		VkResult allocateMemory(const VkMemoryRequirements* requirements, VkMemoryPropertyFlags propertyFlags, ::VkDeviceMemory* memory) const
 		{
+			const uint64_t size = memorySizeClass(requirements->size);
+
+			for (int32_t searchIndex = selectMemoryType(requirements->memoryTypeBits, propertyFlags, 0)
+				; searchIndex >= 0
+				; searchIndex = selectMemoryType(requirements->memoryTypeBits, propertyFlags, searchIndex + 1)
+				)
+			{
+				if (takeCachedMemory(uint32_t(searchIndex), size, memory) )
+				{
+					return VK_SUCCESS;
+				}
+			}
+
+			VkResult result = allocateDeviceMemory(requirements->memoryTypeBits, propertyFlags, size, memory);
+
+			// the size class may not fit where the exact size still does; such a block is not cached
+			if (VK_SUCCESS != result
+			&&  size != requirements->size)
+			{
+				return allocateDeviceMemory(requirements->memoryTypeBits, propertyFlags, requirements->size, memory);
+			}
+
+			return result;
+		}
+
+		VkResult allocateDeviceMemory(uint32_t _memoryTypeBits, VkMemoryPropertyFlags _propertyFlags, uint64_t _size, ::VkDeviceMemory* _memory) const
+		{
 			VkMemoryAllocateInfo ma;
 			ma.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 			ma.pNext = NULL;
-			ma.allocationSize = requirements->size;
+			ma.allocationSize = _size;
 
 			VkResult result = VK_ERROR_UNKNOWN;
 			int32_t searchIndex = -1;
 			do
 			{
 				searchIndex++;
-				searchIndex = selectMemoryType(requirements->memoryTypeBits, propertyFlags, searchIndex);
+				searchIndex = selectMemoryType(_memoryTypeBits, _propertyFlags, searchIndex);
 
 				if (searchIndex >= 0)
 				{
 					ma.memoryTypeIndex = searchIndex;
-					result = vkAllocateMemory(m_device, &ma, m_allocatorCb, memory);
+					result = vkAllocateMemory(m_device, &ma, m_allocatorCb, _memory);
 				}
 			}
 			while (result != VK_SUCCESS
 			   &&  searchIndex >= 0);
 
+			if (VK_SUCCESS == result)
+			{
+				// assigned rather than inserted: a handle value the driver hands out again after a
+				// direct free must not keep the size and type it was freed with
+				DeviceMemoryInfoVK& info = m_memoryInfo[uint64_t(*_memory)];
+				info.size      = _size;
+				info.typeIndex = uint32_t(searchIndex);
+				info.stamp     = 0;
+			}
+
 			return result;
 		}
+
+		/// Octarine: gives device memory back. What the queue releases is idle - the frames that
+		/// used it are done - and unmapped, so instead of going back to the driver it is kept for
+		/// the next allocation of its memory type and size class: a UI that rebuilds geometry
+		/// allocates and frees hundreds of small blocks a frame, and each vkAllocateMemory and
+		/// vkFreeMemory is a trip into the kernel (~0.1 and ~0.2 ms each on a GTX 1650 SUPER).
+		void freeMemory(::VkDeviceMemory _memory) const
+		{
+			const uint64_t handle = uint64_t(_memory);
+			MemoryInfoMap::iterator it = m_memoryInfo.find(handle);
+
+			if (it != m_memoryInfo.end() )
+			{
+				DeviceMemoryInfoVK& info = it->second;
+
+				// a full cache frees the block itself rather than evicting others for it: the same
+				// one call either way, and never a burst of them
+				if (m_memoryCacheOn
+				&&  info.size == memorySizeClass(info.size)
+				&&  info.size <= kMemoryCacheMaxBlock
+				&&  m_memoryCachedBytes + info.size <= kMemoryCacheBudget)
+				{
+					info.stamp = ++m_memoryStamp;
+					m_memoryFree[memoryCacheKey(info.typeIndex, info.size)].push_back(handle);
+					m_memoryOrder.push_back(MemoryOrderVK{ handle, info.stamp, bx::getHPCounter() });
+					m_memoryCachedBytes += info.size;
+					++m_memoryCachedCount;
+					return;
+				}
+
+				m_memoryInfo.erase(it);
+			}
+
+			vkFreeMemory(m_device, _memory, m_allocatorCb);
+		}
+
+		/// Frees the cached blocks cached before _cachedBefore, oldest first, for at most _forTicks
+		/// (bx::getHPCounter times): a UI that stops rebuilding gives its memory back, a little a
+		/// frame, instead of holding the budget for good or freeing it in one long frame.
+		void trimMemoryCache(int64_t _cachedBefore, int64_t _forTicks) const
+		{
+			const uint32_t num   = uint32_t(m_memoryOrder.size() );
+			const int64_t  start = bx::getHPCounter();
+
+			while (m_memoryOrderHead < num)
+			{
+				const MemoryOrderVK entry = m_memoryOrder[m_memoryOrderHead];
+				MemoryInfoMap::iterator it = m_memoryInfo.find(entry.handle);
+
+				// taken since, or cached again later with a newer entry
+				if (it == m_memoryInfo.end()
+				||  it->second.stamp != entry.stamp)
+				{
+					++m_memoryOrderHead;
+					continue;
+				}
+
+				if (entry.time >= _cachedBefore
+				||  bx::getHPCounter() - start > _forTicks)
+				{
+					break;
+				}
+
+				const DeviceMemoryInfoVK info = it->second;
+				stl::vector<uint64_t>& bin = m_memoryFree[memoryCacheKey(info.typeIndex, info.size)];
+
+				for (uint32_t jj = 0, count = uint32_t(bin.size() ); jj < count; ++jj)
+				{
+					if (bin[jj] == entry.handle)
+					{
+						bin[jj] = bin.back();
+						bin.pop_back();
+						break;
+					}
+				}
+
+				m_memoryInfo.erase(it);
+				m_memoryCachedBytes -= info.size;
+				--m_memoryCachedCount;
+				++m_memoryOrderHead;
+				vkFreeMemory(m_device, ::VkDeviceMemory(entry.handle), m_allocatorCb);
+			}
+
+			// the order keeps an entry for every block ever cached; once the ones that no longer
+			// stand for a cached block outnumber the rest, keep only those that still do
+			if (num - m_memoryOrderHead > 2 * m_memoryCachedCount + 1024
+			||  (m_memoryOrderHead > 1024 && 2 * m_memoryOrderHead > num) )
+			{
+				uint32_t kept = 0;
+
+				for (uint32_t ii = m_memoryOrderHead; ii < num; ++ii)
+				{
+					const MemoryOrderVK entry = m_memoryOrder[ii];
+					MemoryInfoMap::iterator it = m_memoryInfo.find(entry.handle);
+
+					if (it != m_memoryInfo.end()
+					&&  it->second.stamp == entry.stamp)
+					{
+						m_memoryOrder[kept++] = entry;
+					}
+				}
+
+				m_memoryOrder.resize(kept);
+				m_memoryOrderHead = 0;
+			}
+		}
+
+		/// Called once a frame: what nothing asked for in kMemoryCacheMaxAgeMs goes back, for at
+		/// most kMemoryCacheTrimUs of the frame.
+		void trimMemoryCache() const
+		{
+			const int64_t freq = bx::getHPFrequency();
+			trimMemoryCache(bx::getHPCounter() - freq * kMemoryCacheMaxAgeMs / 1000, freq * kMemoryCacheTrimUs / 1000000);
+		}
+
+		bool takeCachedMemory(uint32_t _typeIndex, uint64_t _size, ::VkDeviceMemory* _memory) const
+		{
+			MemoryFreeMap::iterator bin = m_memoryFree.find(memoryCacheKey(_typeIndex, _size) );
+
+			if (bin == m_memoryFree.end()
+			||  bin->second.empty() )
+			{
+				return false;
+			}
+
+			const uint64_t handle = bin->second.back();
+			bin->second.pop_back();
+
+			DeviceMemoryInfoVK& info = m_memoryInfo.find(handle)->second;
+			info.stamp = 0;
+			m_memoryCachedBytes -= info.size;
+			--m_memoryCachedCount;
+
+			*_memory = ::VkDeviceMemory(handle);
+			return true;
+		}
+
+		/// Blocks are allocated in size classes so that a cached one fits any request of its class:
+		/// powers of two from 4 KiB to 4 MiB, whole MiBs above.
+		static uint64_t memorySizeClass(uint64_t _size)
+		{
+			constexpr uint64_t kMin     = UINT64_C(4) << 10;
+			constexpr uint64_t kPow2Max = UINT64_C(4) << 20;
+			constexpr uint64_t kStep    = UINT64_C(1) << 20;
+
+			if (_size <= kMin)
+			{
+				return kMin;
+			}
+
+			if (_size <= kPow2Max)
+			{
+				return UINT64_C(1) << (64 - bx::uint64_cntlz(_size - 1) );
+			}
+
+			return (_size + kStep - 1) & ~(kStep - 1);
+		}
+
+		static uint64_t memoryCacheKey(uint32_t _typeIndex, uint64_t _size)
+		{
+			return (uint64_t(_typeIndex) << 56) | _size;
+		}
+
+		struct DeviceMemoryInfoVK
+		{
+			uint64_t size;      //!< What was allocated, a size class unless the class did not fit.
+			uint64_t stamp;     //!< Nonzero while cached: the order entry that stands for it.
+			uint32_t typeIndex;
+		};
+
+		struct MemoryOrderVK
+		{
+			uint64_t handle;
+			uint64_t stamp;
+			int64_t  time;  //!< When it was cached, bx::getHPCounter.
+		};
+
+		typedef stl::unordered_map<uint64_t, DeviceMemoryInfoVK> MemoryInfoMap;
+		typedef stl::unordered_map<uint64_t, stl::vector<uint64_t> > MemoryFreeMap;
+
+		static constexpr uint64_t kMemoryCacheBudget   = UINT64_C(64) << 20;
+		static constexpr uint64_t kMemoryCacheMaxBlock = UINT64_C(16) << 20;
+		static constexpr int64_t  kMemoryCacheMaxAgeMs = 20000;
+		static constexpr int64_t  kMemoryCacheTrimUs   = 500;
+
+		mutable MemoryInfoMap m_memoryInfo;             //!< Every block allocateMemory made that is not freed.
+		mutable MemoryFreeMap m_memoryFree;             //!< Cached blocks by memory type and size class.
+		mutable stl::vector<MemoryOrderVK> m_memoryOrder; //!< Cached blocks, oldest first, from m_memoryOrderHead.
+		mutable uint32_t m_memoryOrderHead = 0;
+		mutable uint64_t m_memoryCachedBytes = 0;
+		mutable uint32_t m_memoryCachedCount = 0;
+		mutable uint64_t m_memoryStamp = 0;
+		bool m_memoryCacheOn = false;
 
 		VkResult createHostBuffer(uint32_t _size, VkMemoryPropertyFlags _flags, ::VkBuffer* _buffer, ::VkDeviceMemory* _memory, const void* _data = NULL)
 		{
@@ -5487,7 +5722,7 @@ VK_DESTROY
 	{
 		if (VK_NULL_HANDLE != _obj)
 		{
-			vkFreeMemory(s_renderVK->m_device, _obj.vk, s_renderVK->m_allocatorCb);
+			s_renderVK->freeMemory(_obj.vk);
 			_obj = VK_NULL_HANDLE;
 		}
 	}
@@ -9216,6 +9451,7 @@ VK_DESTROY
 		}
 
 		m_release[m_consumeIndex].clear();
+		s_renderVK->trimMemoryCache();
 	}
 
 	void RendererContextVK::submitBlit(BlitState& _bs, uint16_t _view)
