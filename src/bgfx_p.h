@@ -1821,6 +1821,10 @@ namespace bgfx
 		uint16_t m_numMatrices;
 		uint8_t  m_submitFlags;
 		uint8_t  m_uniformIdx;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: see RenderDraw::m_nativeCBufferSet.
+		uint32_t m_nativeCBufferSet;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 	};
 
 	union RenderItem

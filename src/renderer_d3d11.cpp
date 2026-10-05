@@ -2802,31 +2802,34 @@ namespace bgfx { namespace d3d11
 		/// Octarine: binds each of a native shader's constant buffers for one draw. _set is the
 		/// counter the draw recorded, so an externally fed buffer resolves to the slice that was
 		/// staged at that moment rather than to whatever the last pane of the frame wrote.
+		ID3D11Buffer* resolveNativeConstantBuffer(const NativeConstantBuffer& _cbuffer, uint32_t _set) const
+		{
+			// a buffer on the uniform path never stages anything, and neither does one nothing
+			// has fed this frame, so both keep the plain buffer
+			if (_cbuffer.m_ringFrame == m_nativeCBufferFrame)
+			{
+				// the last slice staged at or before this draw was recorded. The list is short -
+				// one entry per distinct value the frame fed, so one in the ordinary case.
+				for (uint8_t jj = _cbuffer.m_numUses; 0 != jj; --jj)
+				{
+					const NativeConstantBufferUse& use = _cbuffer.m_uses[jj-1];
+
+					if (use.m_set <= _set)
+					{
+						return _cbuffer.m_slices[use.m_slice].m_buffer;
+					}
+				}
+			}
+
+			return _cbuffer.m_buffer;
+		}
+
 		void bindNativeConstantBuffers(const ShaderD3D11* _shader, bool _fragment, uint32_t _set)
 		{
 			for (uint8_t ii = 0; ii < _shader->m_numNativeCBuffers; ++ii)
 			{
 				const NativeConstantBuffer& cbuffer = _shader->m_nativeCBuffers[ii];
-
-				// a buffer on the uniform path never stages anything, and neither does one nothing
-				// has fed this frame, so both keep the plain buffer
-				ID3D11Buffer* buffer = cbuffer.m_buffer;
-
-				if (cbuffer.m_ringFrame == m_nativeCBufferFrame)
-				{
-					// the last slice staged at or before this draw was recorded. The list is short -
-					// one entry per distinct value the frame fed, so one in the ordinary case.
-					for (uint8_t jj = cbuffer.m_numUses; 0 != jj; --jj)
-					{
-						const NativeConstantBufferUse& use = cbuffer.m_uses[jj-1];
-
-						if (use.m_set <= _set)
-						{
-							buffer = cbuffer.m_slices[use.m_slice].m_buffer;
-							break;
-						}
-					}
-				}
+				ID3D11Buffer* buffer = resolveNativeConstantBuffer(cbuffer, _set);
 
 				if (_fragment)
 				{
@@ -2837,6 +2840,55 @@ namespace bgfx { namespace d3d11
 					m_deviceCtx->VSSetConstantBuffers(cbuffer.m_slot, 1, &buffer);
 				}
 			}
+		}
+
+		/// Octarine: a native compute shader's registers are remapped from bind stages the same
+		/// way as a draw's, u registers included.
+		void bindNativeCompute(const ShaderD3D11* _shader, uint32_t _set, ID3D11UnorderedAccessView* const* _uav)
+		{
+			ID3D11ShaderResourceView*  srv[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS] = {};
+			ID3D11SamplerState*        sampler[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
+			ID3D11UnorderedAccessView* uav[BGFX_MAX_COMPUTE_BINDINGS] = {};
+			const uint32_t numUav = g_caps.limits.maxComputeBindings;
+
+			for (uint8_t ii = 0; ii < _shader->m_numNativeSrvs; ++ii)
+			{
+				const NativeResourceSlot& res = _shader->m_nativeSrvs[ii];
+				if (res.m_slot < BX_COUNTOF(srv) )
+				{
+					srv[res.m_slot] = m_textureStage.m_srv[res.m_bindStage];
+				}
+			}
+
+			for (uint8_t ii = 0; ii < _shader->m_numNativeSamplers; ++ii)
+			{
+				const NativeResourceSlot& res = _shader->m_nativeSamplers[ii];
+				if (res.m_slot < BX_COUNTOF(sampler) )
+				{
+					sampler[res.m_slot] = m_textureStage.m_sampler[res.m_bindStage];
+				}
+			}
+
+			for (uint8_t ii = 0; ii < _shader->m_numNativeUavs; ++ii)
+			{
+				const NativeResourceSlot& res = _shader->m_nativeUavs[ii];
+				if (res.m_slot < numUav
+				&&  res.m_bindStage < numUav)
+				{
+					uav[res.m_slot] = _uav[res.m_bindStage];
+				}
+			}
+
+			for (uint8_t ii = 0; ii < _shader->m_numNativeCBuffers; ++ii)
+			{
+				const NativeConstantBuffer& cbuffer = _shader->m_nativeCBuffers[ii];
+				ID3D11Buffer* buffer = resolveNativeConstantBuffer(cbuffer, _set);
+				m_deviceCtx->CSSetConstantBuffers(cbuffer.m_slot, 1, &buffer);
+			}
+
+			m_deviceCtx->CSSetUnorderedAccessViews(0, numUav, uav, NULL);
+			m_deviceCtx->CSSetShaderResources(0, BX_COUNTOF(srv), srv);
+			m_deviceCtx->CSSetSamplers(0, BX_COUNTOF(sampler), sampler);
 		}
 
 		void commitNativeConstants(const ShaderD3D11* _shader, const uint8_t* _scratch)
@@ -4350,9 +4402,10 @@ namespace bgfx { namespace d3d11
 		desc.ByteWidth = _size;
 		// a structured buffer cannot also be a vertex or index buffer: D3D11 rejects the
 		// combination outright, and DX_CHECK is silent in a release build, so the failure
-		// shows up only as a null srv much later
+		// shows up only as a null srv much later. A raw one can, which lets a compute shader
+		// read a mesh's vertices where the draw fetches them
 		desc.BindFlags = 0
-			| ( (structured || rawBuffer) ? 0 : (_vertex ? D3D11_BIND_VERTEX_BUFFER : D3D11_BIND_INDEX_BUFFER) )
+			| (structured ? 0 : (_vertex ? D3D11_BIND_VERTEX_BUFFER : D3D11_BIND_INDEX_BUFFER) )
 			| (needUav ? D3D11_BIND_UNORDERED_ACCESS : 0)
 			| (needSrv ? D3D11_BIND_SHADER_RESOURCE  : 0)
 			;
@@ -4414,7 +4467,7 @@ namespace bgfx { namespace d3d11
 		{
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.CPUAccessFlags = 0;
-			desc.StructureByteStride = _stride;
+			desc.StructureByteStride = structured ? _stride : 0;
 
 			DX_CHECK(device->CreateBuffer(&desc
 				, NULL == _data ? NULL : &srd
@@ -4422,11 +4475,11 @@ namespace bgfx { namespace d3d11
 				) );
 
 			D3D11_UNORDERED_ACCESS_VIEW_DESC uavd;
-			uavd.Format = format;
+			uavd.Format = rawBuffer ? DXGI_FORMAT_R32_TYPELESS : structured ? DXGI_FORMAT_UNKNOWN : format;
 			uavd.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
 			uavd.Buffer.FirstElement = 0;
-			uavd.Buffer.NumElements = m_size / stride;
-			uavd.Buffer.Flags = 0;
+			uavd.Buffer.NumElements = m_size / (rawBuffer ? 4 : structured ? _stride : stride);
+			uavd.Buffer.Flags = rawBuffer ? D3D11_BUFFER_UAV_FLAG_RAW : 0;
 			DX_CHECK(device->CreateUnorderedAccessView(m_ptr
 				, &uavd
 				, &m_uav
@@ -4588,6 +4641,99 @@ namespace bgfx { namespace d3d11
 			;
 
 		BufferD3D11::create(_size, _data, _flags, stride, true);
+	}
+
+	// Octarine: bgfx's DXBC reader indexes its opcode table with whatever the token says and
+	// overruns the instruction on opcodes it does not know, which Valve's shaders use. A shipped
+	// shader is only walked by instruction length, every read bounds checked.
+	static bool hasNativeDepthOp(const void* _code, uint32_t _size)
+	{
+		const uint8_t* bytes = (const uint8_t*)_code;
+		const auto word = [&](uint32_t _at) { uint32_t out; bx::memCopy(&out, bytes + _at, 4); return out; };
+
+		if (_size < 32 || word(0) != BX_MAKEFOURCC('D', 'X', 'B', 'C') )
+		{
+			return true;
+		}
+
+		const uint32_t numChunks = word(28);
+		if (numChunks > (_size - 32) / 4)
+		{
+			return true;
+		}
+
+		for (uint32_t ii = 0; ii < numChunks; ++ii)
+		{
+			const uint32_t chunk = word(32 + ii*4);
+			if (chunk > _size - 8)
+			{
+				return true;
+			}
+
+			const uint32_t fourcc = word(chunk);
+			if (fourcc != BX_MAKEFOURCC('S', 'H', 'E', 'X')
+			&&  fourcc != BX_MAKEFOURCC('S', 'H', 'D', 'R') )
+			{
+				continue;
+			}
+
+			const uint32_t chunkSize = word(chunk + 4);
+			if (chunkSize < 8 || chunkSize > _size - chunk - 8)
+			{
+				return true;
+			}
+
+			const uint32_t base = chunk + 8;
+			const uint32_t numTokens = bx::min(word(base + 4), chunkSize / 4);
+			for (uint32_t token = 2; token < numTokens;)
+			{
+				const uint32_t opcodeToken = word(base + token*4);
+				const uint32_t opcode = opcodeToken & 0x7ff;
+				uint32_t length = (opcodeToken >> 24) & 0x7f;
+
+				if (opcode == 0x35 /* CUSTOMDATA */)
+				{
+					if (token + 1 >= numTokens)
+					{
+						return true;
+					}
+
+					length = word(base + (token + 1)*4);
+				}
+				else if (opcode == 0x0d /* DISCARD */)
+				{
+					return true;
+				}
+				else
+				{
+					uint32_t operand = token + 1;
+					for (uint32_t extended = opcodeToken; (extended & UINT32_C(0x80000000) ) && operand < token + length; ++operand)
+					{
+						extended = word(base + operand*4);
+					}
+
+					if (operand < token + length && operand < numTokens)
+					{
+						const uint32_t type = (word(base + operand*4) >> 12) & 0xff;
+						if (type == 0x0c || type == 0x26 || type == 0x27 /* oDepth, oDepthGE, oDepthLE */)
+						{
+							return true;
+						}
+					}
+				}
+
+				if (length == 0)
+				{
+					return true;
+				}
+
+				token += length;
+			}
+
+			return false;
+		}
+
+		return true;
 	}
 
 	static bool hasDepthOp(const void* _code, uint32_t _size)
@@ -4871,7 +5017,7 @@ namespace bgfx { namespace d3d11
 
 		if (isShaderType(magic, 'F') )
 		{
-			m_hasDepthOp = hasDepthOp(code, shaderSize);
+			m_hasDepthOp = nativeShader ? hasNativeDepthOp(code, shaderSize) : hasDepthOp(code, shaderSize);
 			DX_CHECK(s_renderD3D11->m_device->CreatePixelShader(code, shaderSize, NULL, &m_pixelShader) );
 			BGFX_FATAL(NULL != m_ptr, bgfx::Fatal::InvalidShader, "Failed to create fragment shader.");
 		}
@@ -5038,8 +5184,21 @@ namespace bgfx { namespace d3d11
 				bx::read(&reader, m_nativeSamplers[ii].m_slot, bx::ErrorAssert{});
 			}
 
+			uint8_t numUavs = 0;
+			bx::read(&reader, numUavs, bx::ErrorAssert{});
+			BGFX_FATAL(numUavs <= BGFX_MAX_COMPUTE_BINDINGS, bgfx::Fatal::InvalidShader
+				, "Native shader declares %d uav bindings, %d is the maximum."
+				, numUavs, BGFX_MAX_COMPUTE_BINDINGS);
+
+			for (uint8_t ii = 0; ii < numUavs; ++ii)
+			{
+				bx::read(&reader, m_nativeUavs[ii].m_bindStage, bx::ErrorAssert{});
+				bx::read(&reader, m_nativeUavs[ii].m_slot, bx::ErrorAssert{});
+			}
+
 			m_numNativeSrvs = numSrvs;
 			m_numNativeSamplers = numSamplers;
+			m_numNativeUavs = numUavs;
 
 			BX_TRACE("\tnative shader, %d vertex attributes", numNative);
 		}
@@ -6665,9 +6824,19 @@ namespace bgfx { namespace d3d11
 						deviceCtx->CSSetShaderResources(0, maxComputeBindings, s_zero.m_srv);
 					}
 
-					deviceCtx->CSSetUnorderedAccessViews(0, maxComputeBindings, uav, NULL);
-					deviceCtx->CSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
-					deviceCtx->CSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+					if (isValid(currentProgram)
+					&&  m_program[currentProgram.idx].m_vsh->m_native)
+					{
+						bindNativeCompute(m_program[currentProgram.idx].m_vsh, compute.m_nativeCBufferSet, uav);
+					}
+					else
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
+					{
+						deviceCtx->CSSetUnorderedAccessViews(0, maxComputeBindings, uav, NULL);
+						deviceCtx->CSSetShaderResources(0, maxTextureSamplers, m_textureStage.m_srv);
+						deviceCtx->CSSetSamplers(0, maxSamplers, m_textureStage.m_sampler);
+					}
 
 					if (isValid(compute.m_indirectBuffer) )
 					{

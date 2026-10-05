@@ -167,6 +167,7 @@
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdSetBlendConstants);          \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdSetScissor);                 \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdBindDescriptorSets);         \
+			VK_IMPORT_DEVICE_FUNC(false, vkCmdPushConstants);         \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdBindIndexBuffer);            \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdBindVertexBuffers);          \
 			VK_IMPORT_DEVICE_FUNC(false, vkCmdClearColorImage);            \
@@ -515,6 +516,11 @@ VK_DESTROY_FUNC(SurfaceKHR);
 	constexpr uint32_t kMaxNativeVkImages    = 64;
 	/// Octarine: the largest constant buffer a shipped shader can declare, D3D11's 4096 registers.
 	constexpr uint32_t kMaxNativeVkCBufferSize = 64<<10;
+	/// Octarine: the binding a native constant block states when it is the program's push
+	/// constants rather than a uniform buffer. It is fed through the same ring.
+	constexpr uint16_t kNativeVkPushConstantBinding = UINT16_MAX;
+	/// Octarine: the push constant space every Vulkan device offers.
+	constexpr uint32_t kMaxNativeVkPushConstantSize = 128;
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 	struct ShaderVK
@@ -540,6 +546,9 @@ VK_DESTROY_FUNC(SurfaceKHR);
 		uint8_t m_numNativeAttribs = 0;
 		uint8_t m_numNativeCBuffers = 0;
 		uint8_t m_numNativeResources = 0;
+		/// the constant block delivered as push constants, or UINT8_MAX
+		uint8_t m_nativePushConstant = UINT8_MAX;
+		VkShaderStageFlags m_nativeStage = 0;
 		NativeVkAttrib   m_nativeAttribs[kMaxNativeVkAttribs];
 		NativeVkCBuffer  m_nativeCBuffers[kMaxNativeVkCBuffers];
 		NativeVkResource m_nativeResources[kMaxNativeVkResources];
@@ -603,6 +612,11 @@ VK_DESTROY_FUNC(SurfaceKHR);
 
 		VkDescriptorSetLayout m_descriptorSetLayout;
 		VkPipelineLayout m_pipelineLayout;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		/// Octarine: the one push constant range of a native program, over every stage stating it
+		VkShaderStageFlags m_nativePushStages = 0;
+		uint32_t m_nativePushSize = 0;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 	};
 
 	struct TimerQueryVK

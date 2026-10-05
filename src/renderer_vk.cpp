@@ -2741,6 +2741,158 @@ VK_IMPORT_DEVICE
 		/// Octarine: where in the frame's scratch buffer one native constant buffer's bytes for
 		/// this draw live, copying them there if they are not yet. _range is what the descriptor
 		/// reads, the larger of the two stages' declarations. UINT32_MAX when the buffer is full.
+		/// Octarine: the ring slice an externally fed block held when a draw or dispatch recorded
+		/// set _set, or the last one staged; NULL when nothing fed it.
+		NativeVkSlice* nativeCBufferSlice(NativeVkCBuffer& _cbuffer, uint32_t _set)
+		{
+			if (_cbuffer.m_ringFrame == m_nativeCBufferFrame)
+			{
+				for (uint8_t jj = _cbuffer.m_numUses; 0 != jj; --jj)
+				{
+					const NativeVkUse& use = _cbuffer.m_uses[jj-1];
+
+					if (use.m_set <= _set)
+					{
+						return &_cbuffer.m_slices[use.m_slice];
+					}
+				}
+			}
+
+			return _cbuffer.m_haveLast ? &_cbuffer.m_slices[_cbuffer.m_lastSlice] : NULL;
+		}
+
+		/// Octarine: pushes a native program's push constant block for set _set. One range covers
+		/// every stage that states a block, filled from the first stage that does.
+		void pushNativeConstants(const ProgramVK& _program, uint32_t _set)
+		{
+			if (0 == _program.m_nativePushSize)
+			{
+				return;
+			}
+
+			uint8_t data[kMaxNativeVkPushConstantSize] = {};
+
+			for (uint32_t ss = 0; ss < 2; ++ss)
+			{
+				ShaderVK* shader = const_cast<ShaderVK*>(0 == ss ? _program.m_vsh : _program.m_fsh);
+
+				if (NULL == shader
+				||  !shader->m_native
+				||  UINT8_MAX == shader->m_nativePushConstant)
+				{
+					continue;
+				}
+
+				NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[shader->m_nativePushConstant];
+				const uint32_t size = bx::min(cbuffer.m_size, _program.m_nativePushSize);
+
+				if (UINT32_MAX != cbuffer.m_scratchOffset)
+				{
+					const uint8_t* scratch = 1 == ss ? m_fsScratch : m_vsScratch;
+					const uint32_t start = bx::min<uint32_t>(cbuffer.m_scratchOffset, sizeof(m_vsScratch) - size);
+					bx::memCopy(data, scratch + start, size);
+				}
+				else if (const NativeVkSlice* slice = nativeCBufferSlice(cbuffer, _set) )
+				{
+					if (NULL != slice->m_data)
+					{
+						bx::memCopy(data, slice->m_data, size);
+					}
+				}
+
+				break;
+			}
+
+			vkCmdPushConstants(m_commandBuffer, _program.m_pipelineLayout, _program.m_nativePushStages
+				, 0, _program.m_nativePushSize, data);
+		}
+
+		/// Octarine: the dynamic offsets of a native program's uniform buffers for set _set, in
+		/// binding order; false when the frame's scratch buffer ran out.
+		bool nativeDynamicOffsets(const ProgramVK& _program, uint32_t _set, ScratchBufferVK& _scratchBuffer
+			, uint32_t* _offsets, uint32_t& _numOffsets)
+		{
+			struct { uint16_t binding; uint32_t offset; } dynamic[2 * kMaxNativeVkCBuffers];
+			uint32_t numDynamic = 0;
+
+			for (uint32_t ss = 0; ss < 2; ++ss)
+			{
+				ShaderVK* shader = const_cast<ShaderVK*>(0 == ss ? _program.m_vsh : _program.m_fsh);
+
+				if (NULL == shader || !shader->m_native)
+				{
+					continue;
+				}
+
+				for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
+				{
+					NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
+
+					if (ii == shader->m_nativePushConstant)
+					{
+						continue;
+					}
+
+					bool seen = false;
+
+					for (uint32_t jj = 0; jj < numDynamic; ++jj)
+					{
+						seen = seen || dynamic[jj].binding == cbuffer.m_binding;
+					}
+
+					if (seen)
+					{
+						continue;
+					}
+
+					// both stages may declare one binding; the larger declaration feeds it, since
+					// the descriptor's range has to cover it
+					NativeVkCBuffer* source = &cbuffer;
+					bool sourceFragment = 1 == ss;
+					ShaderVK* other = 0 == ss ? const_cast<ShaderVK*>(_program.m_fsh) : NULL;
+
+					for (uint8_t jj = 0; NULL != other && other->m_native && jj < other->m_numNativeCBuffers; ++jj)
+					{
+						if (other->m_nativeCBuffers[jj].m_binding == cbuffer.m_binding
+						&&  other->m_nativeCBuffers[jj].m_size > source->m_size)
+						{
+							source = &other->m_nativeCBuffers[jj];
+							sourceFragment = true;
+						}
+					}
+
+					dynamic[numDynamic].binding = cbuffer.m_binding;
+					dynamic[numDynamic].offset  = nativeCBufferOffset(*source, sourceFragment
+						, _set, (source->m_size + 0xf) & ~0xf, _scratchBuffer);
+
+					if (UINT32_MAX == dynamic[numDynamic].offset)
+					{
+						return false;
+					}
+
+					++numDynamic;
+				}
+			}
+
+			for (uint32_t ii = 1; ii < numDynamic; ++ii)
+			{
+				for (uint32_t jj = ii; 0 < jj && dynamic[jj-1].binding > dynamic[jj].binding; --jj)
+				{
+					const auto swap = dynamic[jj];
+					dynamic[jj]   = dynamic[jj-1];
+					dynamic[jj-1] = swap;
+				}
+			}
+
+			for (uint32_t ii = 0; ii < numDynamic; ++ii)
+			{
+				_offsets[ii] = dynamic[ii].offset;
+			}
+
+			_numOffsets = numDynamic;
+			return true;
+		}
+
 		uint32_t nativeCBufferOffset(NativeVkCBuffer& _cbuffer, bool _fragment, uint32_t _set
 			, uint32_t _range, ScratchBufferVK& _scratchBuffer)
 		{
@@ -2754,27 +2906,7 @@ VK_IMPORT_DEVICE
 				return _scratchBuffer.write(scratch + start, bx::min(size, avail), _range);
 			}
 
-			NativeVkSlice* slice = NULL;
-
-			if (_cbuffer.m_ringFrame == m_nativeCBufferFrame)
-			{
-				for (uint8_t jj = _cbuffer.m_numUses; 0 != jj; --jj)
-				{
-					const NativeVkUse& use = _cbuffer.m_uses[jj-1];
-
-					if (use.m_set <= _set)
-					{
-						slice = &_cbuffer.m_slices[use.m_slice];
-						break;
-					}
-				}
-			}
-
-			if (NULL == slice
-			&&  _cbuffer.m_haveLast)
-			{
-				slice = &_cbuffer.m_slices[_cbuffer.m_lastSlice];
-			}
+			NativeVkSlice* slice = nativeCBufferSlice(_cbuffer, _set);
 
 			if (NULL == slice
 			||  NULL == slice->m_data)
@@ -2948,7 +3080,9 @@ VK_IMPORT_DEVICE
 				{
 					const NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
 
-					if (isWritten(cbuffer.m_binding) || kMaxWrites == wdsCount)
+					if (ii == shader->m_nativePushConstant
+					||  isWritten(cbuffer.m_binding)
+					||  kMaxWrites == wdsCount)
 					{
 						continue;
 					}
@@ -4542,6 +4676,18 @@ VK_IMPORT_DEVICE
 
 			VkPipelineRasterizationStateCreateInfo rasterizationState;
 			setRasterizerState(rasterizationState, _state, m_wireframe);
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+			// Octarine: a native program is drawn through an upright viewport (see submit), in which
+			// the framebuffer winding reads opposite to bgfx's flipped one, so its front face flips too
+			if (program.m_vsh->m_native)
+			{
+				rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE == rasterizationState.frontFace
+					? VK_FRONT_FACE_CLOCKWISE
+					: VK_FRONT_FACE_COUNTER_CLOCKWISE
+					;
+			}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
 			VkBaseInStructure* nextRasterizationState = (VkBaseInStructure*)&rasterizationState;
 
@@ -6310,9 +6456,19 @@ VK_DESTROY
 				bx::read(&reader, cbuffer.m_scratchOffset, &err);
 				bx::read(&reader, cbuffer.m_size, &err);
 				cbuffer.m_size = bx::min(cbuffer.m_size, kMaxNativeVkCBufferSize);
+
+				if (kNativeVkPushConstantBinding == cbuffer.m_binding)
+				{
+					BGFX_FATAL(cbuffer.m_size <= kMaxNativeVkPushConstantSize && UINT8_MAX == m_nativePushConstant
+						, bgfx::Fatal::InvalidShader
+						, "Native shader declares %d bytes of push constants, one block of %d is the maximum."
+						, cbuffer.m_size, kMaxNativeVkPushConstantSize);
+					m_nativePushConstant = ii;
+				}
 			}
 
 			m_numNativeCBuffers = numCBuffers;
+			m_nativeStage = shaderStage;
 
 			uint8_t numResources = 0;
 			bx::read(&reader, numResources, &err);
@@ -6374,6 +6530,11 @@ VK_DESTROY
 
 			for (uint8_t ii = 0; ii < m_numNativeCBuffers; ++ii)
 			{
+				if (ii == m_nativePushConstant)
+				{
+					continue;
+				}
+
 				VkDescriptorSetLayoutBinding& binding = m_bindings[nidx++];
 				binding.binding            = m_nativeCBuffers[ii].m_binding;
 				binding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -6490,6 +6651,8 @@ VK_DESTROY
 		m_numNativeAttribs = 0;
 		m_numNativeCBuffers = 0;
 		m_numNativeResources = 0;
+		m_nativePushConstant = UINT8_MAX;
+		m_nativeStage = 0;
 		m_nativeSamplerMask = 0;
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 
@@ -6652,6 +6815,33 @@ VK_DESTROY
 		plci.flags = 0;
 		plci.pushConstantRangeCount = 0;
 		plci.pPushConstantRanges = NULL;
+
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		m_nativePushStages = 0;
+		m_nativePushSize = 0;
+
+		const ShaderVK* shaders[] = { m_vsh, m_fsh };
+
+		for (const ShaderVK* shader : shaders)
+		{
+			if (NULL != shader
+			&&  shader->m_native
+			&&  UINT8_MAX != shader->m_nativePushConstant)
+			{
+				m_nativePushStages |= shader->m_nativeStage;
+				m_nativePushSize = bx::max(m_nativePushSize
+					, (shader->m_nativeCBuffers[shader->m_nativePushConstant].m_size + 3) & ~3u);
+			}
+		}
+
+		const VkPushConstantRange pushRange = { m_nativePushStages, 0, m_nativePushSize };
+
+		if (0 != m_nativePushSize)
+		{
+			plci.pushConstantRangeCount = 1;
+			plci.pPushConstantRanges = &pushRange;
+		}
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		plci.setLayoutCount = (m_descriptorSetLayout == VK_NULL_HANDLE ? 0 : 1);
 		plci.pSetLayouts = &m_descriptorSetLayout;
 
@@ -9865,6 +10055,46 @@ VK_DESTROY
 						viewState.setPredefined<4>(this, view, program, _render, compute);
 					}
 
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+					// Octarine: a native program binds its one set the way a native draw does
+					if (program.m_vsh->m_native)
+					{
+						uint32_t offsets[2 * kMaxNativeVkCBuffers];
+						uint32_t numDynamic = 0;
+
+						if (!nativeDynamicOffsets(program, compute.m_nativeCBufferSet, scratchBuffer, offsets, numDynamic) )
+						{
+							continue;
+						}
+
+						if (VK_NULL_HANDLE != program.m_descriptorSetLayout)
+						{
+							currentDescriptorSet = getNativeDescriptorSet(program, renderBind, scratchBuffer, _render->m_colorPalette);
+							currentBindHash = 0;
+
+							if (VK_NULL_HANDLE == currentDescriptorSet)
+							{
+								continue;
+							}
+
+							descriptorSetCount++;
+
+							vkCmdBindDescriptorSets(
+								  m_commandBuffer
+								, VK_PIPELINE_BIND_POINT_COMPUTE
+								, program.m_pipelineLayout
+								, 0
+								, 1
+								, &currentDescriptorSet
+								, numDynamic
+								, offsets
+								);
+						}
+
+						pushNativeConstants(program, compute.m_nativeCBufferSet);
+					}
+					else
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 					if (VK_NULL_HANDLE != program.m_descriptorSetLayout)
 					{
 						const uint32_t vsize = program.m_vsh->m_size;
@@ -10215,80 +10445,13 @@ VK_DESTROY
 					&&  VK_NULL_HANDLE != program.m_descriptorSetLayout)
 					{
 						// every uniform buffer of the pair is a dynamic one in the scratch buffer,
-						// and the offsets go in binding order
-						struct { uint16_t binding; uint32_t offset; } dynamic[2 * kMaxNativeVkCBuffers];
+						// and the offsets go in binding order; no room left drops the draw
+						uint32_t offsets[2 * kMaxNativeVkCBuffers];
 						uint32_t numDynamic = 0;
-						bool outOfScratch = false;
 
-						for (uint32_t ss = 0; ss < 2; ++ss)
-						{
-							ShaderVK* shader = const_cast<ShaderVK*>(0 == ss ? program.m_vsh : program.m_fsh);
-
-							if (NULL == shader || !shader->m_native)
-							{
-								continue;
-							}
-
-							for (uint8_t ii = 0; ii < shader->m_numNativeCBuffers; ++ii)
-							{
-								NativeVkCBuffer& cbuffer = shader->m_nativeCBuffers[ii];
-								bool seen = false;
-
-								for (uint32_t jj = 0; jj < numDynamic; ++jj)
-								{
-									seen = seen || dynamic[jj].binding == cbuffer.m_binding;
-								}
-
-								if (seen)
-								{
-									continue;
-								}
-
-								// both stages may declare one binding; the larger declaration
-								// feeds it, since the descriptor's range has to cover it
-								NativeVkCBuffer* source = &cbuffer;
-								bool sourceFragment = 1 == ss;
-								ShaderVK* other = 0 == ss ? const_cast<ShaderVK*>(program.m_fsh) : NULL;
-
-								for (uint8_t jj = 0; NULL != other && other->m_native && jj < other->m_numNativeCBuffers; ++jj)
-								{
-									if (other->m_nativeCBuffers[jj].m_binding == cbuffer.m_binding
-									&&  other->m_nativeCBuffers[jj].m_size > source->m_size)
-									{
-										source = &other->m_nativeCBuffers[jj];
-										sourceFragment = true;
-									}
-								}
-
-								dynamic[numDynamic].binding = cbuffer.m_binding;
-								dynamic[numDynamic].offset  = nativeCBufferOffset(*source, sourceFragment
-									, draw.m_nativeCBufferSet, (source->m_size + 0xf) & ~0xf, scratchBuffer);
-								outOfScratch = outOfScratch || UINT32_MAX == dynamic[numDynamic].offset;
-								++numDynamic;
-							}
-						}
-
-						// no room left this frame; the draw is dropped
-						if (outOfScratch)
+						if (!nativeDynamicOffsets(program, draw.m_nativeCBufferSet, scratchBuffer, offsets, numDynamic) )
 						{
 							continue;
-						}
-
-						for (uint32_t ii = 1; ii < numDynamic; ++ii)
-						{
-							for (uint32_t jj = ii; 0 < jj && dynamic[jj-1].binding > dynamic[jj].binding; --jj)
-							{
-								const auto swap = dynamic[jj];
-								dynamic[jj]   = dynamic[jj-1];
-								dynamic[jj-1] = swap;
-							}
-						}
-
-						uint32_t offsets[2 * kMaxNativeVkCBuffers];
-
-						for (uint32_t ii = 0; ii < numDynamic; ++ii)
-						{
-							offsets[ii] = dynamic[ii].offset;
 						}
 
 						bx::HashMurmur2A hash;
@@ -10323,6 +10486,8 @@ VK_DESTROY
 							, numDynamic
 							, offsets
 							);
+
+						pushNativeConstants(program, draw.m_nativeCBufferSet);
 					}
 					else
 #endif // BGFX_CONFIG_OCT_NATIVE_SHADERS

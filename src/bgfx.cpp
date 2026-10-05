@@ -1373,6 +1373,9 @@ namespace bgfx
 		m_compute.m_uniformIdx   = m_uniformIdx;
 		m_compute.m_uniformBegin = m_uniformBegin;
 		m_compute.m_uniformEnd   = m_uniformEnd;
+#if BGFX_CONFIG_OCT_NATIVE_SHADERS
+		m_compute.m_nativeCBufferSet = s_nativeCBufferSet;
+#endif // BGFX_CONFIG_OCT_NATIVE_SHADERS
 		m_frame->m_renderItem[renderItemIdx].compute = m_compute;
 		m_frame->m_renderItemBind[renderItemIdx]     = m_bind;
 

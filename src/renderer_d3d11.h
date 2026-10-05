@@ -236,6 +236,7 @@ namespace bgfx { namespace d3d11
 			, m_numNativeCBuffers(0)
 			, m_numNativeSrvs(0)
 			, m_numNativeSamplers(0)
+			, m_numNativeUavs(0)
 #endif
 		{
 		}
@@ -289,6 +290,7 @@ namespace bgfx { namespace d3d11
 			m_numNativeCBuffers = 0;
 			m_numNativeSrvs = 0;
 			m_numNativeSamplers = 0;
+			m_numNativeUavs = 0;
 #endif
 
 			if (NULL != m_buffer)
@@ -331,8 +333,10 @@ namespace bgfx { namespace d3d11
 		uint8_t m_numNativeCBuffers;
 		uint8_t m_numNativeSrvs;
 		uint8_t m_numNativeSamplers;
+		uint8_t m_numNativeUavs;
 		NativeResourceSlot m_nativeSrvs[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
 		NativeResourceSlot m_nativeSamplers[BGFX_CONFIG_MAX_TEXTURE_SAMPLERS];
+		NativeResourceSlot m_nativeUavs[BGFX_MAX_COMPUTE_BINDINGS];
 		NativeVertexAttrib m_nativeAttribs[kMaxNativeVertexAttribs];
 		NativeConstantBuffer m_nativeCBuffers[kMaxNativeConstantBuffers];
 #endif
