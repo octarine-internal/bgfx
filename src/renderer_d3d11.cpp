@@ -5970,6 +5970,13 @@ namespace bgfx { namespace d3d11
 				{
 					const TextureD3D11& texture = s_renderD3D11->m_textures[at.handle.idx];
 
+					// A texture the device failed to create, as every one is once the device is removed,
+					// has no resource to make a view of: its attachment is left out.
+					if (NULL == texture.m_ptr)
+					{
+						continue;
+					}
+
 					if (0 == m_width)
 					{
 						switch (texture.m_type)
@@ -6139,9 +6146,13 @@ namespace bgfx { namespace d3d11
 							break;
 						}
 
-						D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-						texture.m_srv->GetDesc(&srvDesc);
-						DX_CHECK(s_renderD3D11->m_device->CreateShaderResourceView(texture.m_ptr, &srvDesc, &m_srv[m_num]));
+						m_srv[m_num] = NULL;
+						if (NULL != texture.m_srv)
+						{
+							D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+							texture.m_srv->GetDesc(&srvDesc);
+							DX_CHECK(s_renderD3D11->m_device->CreateShaderResourceView(texture.m_ptr, &srvDesc, &m_srv[m_num]));
+						}
 						m_num++;
 					}
 					else
