@@ -1691,6 +1691,8 @@ namespace bgfx { namespace d3d11
 				m_textures[ii].destroy();
 			}
 
+			DX_RELEASE(m_uploadRing, 0);
+
 			DX_RELEASE(m_annotation, 1);
 			DX_RELEASE_W(m_infoQueue, 0);
 			DX_RELEASE(m_msaaRt, 0);
@@ -4225,6 +4227,68 @@ namespace bgfx { namespace d3d11
 
 		TextVideoMem m_textVideoMem;
 
+		/// Octarine: where a partial update of a dynamic buffer goes through on its way to the GPU: a
+		/// dynamic buffer written past what the GPU may still read, from the start again once full, and
+		/// copied into the destination on the context. A staging buffer made per update was a driver
+		/// allocation for every UI geometry upload.
+		static constexpr uint32_t kUploadRingSize = 4u << 20;
+		ID3D11Buffer* m_uploadRing = NULL;
+		uint32_t m_uploadRingOffset = 0;
+
+		/// Octarine: copies `_size` bytes into `_dst` at `_offset` through the upload ring; false when
+		/// the ring cannot take them.
+		bool uploadBuffer(ID3D11Buffer* _dst, uint32_t _offset, const void* _data, uint32_t _size)
+		{
+			if (_size == 0 || _size > kUploadRingSize)
+			{
+				return false;
+			}
+
+			if (NULL == m_uploadRing)
+			{
+				D3D11_BUFFER_DESC desc;
+				desc.ByteWidth           = kUploadRingSize;
+				desc.Usage               = D3D11_USAGE_DYNAMIC;
+				desc.BindFlags           = D3D11_BIND_VERTEX_BUFFER;
+				desc.CPUAccessFlags      = D3D11_CPU_ACCESS_WRITE;
+				desc.MiscFlags           = 0;
+				desc.StructureByteStride = 0;
+				if (FAILED(m_device->CreateBuffer(&desc, NULL, &m_uploadRing) ) )
+				{
+					m_uploadRing = NULL;
+					return false;
+				}
+				m_uploadRingOffset = kUploadRingSize;
+			}
+
+			uint32_t start = bx::alignUp(m_uploadRingOffset, 16);
+			D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
+			if (start > kUploadRingSize - _size)
+			{
+				start = 0;
+				map   = D3D11_MAP_WRITE_DISCARD;
+			}
+
+			D3D11_MAPPED_SUBRESOURCE mapped;
+			if (FAILED(m_deviceCtx->Map(m_uploadRing, 0, map, 0, &mapped) ) )
+			{
+				return false;
+			}
+			bx::memCopy( (uint8_t*)mapped.pData + start, _data, _size);
+			m_deviceCtx->Unmap(m_uploadRing, 0);
+			m_uploadRingOffset = start + _size;
+
+			D3D11_BOX box;
+			box.left   = start;
+			box.top    = 0;
+			box.front  = 0;
+			box.right  = start + _size;
+			box.bottom = 1;
+			box.back   = 1;
+			m_deviceCtx->CopySubresourceRegion(_dst, 0, _offset, 0, 0, m_uploadRing, 0, &box);
+			return true;
+		}
+
 		TextureStage m_textureStage;
 		/// Octarine: how many stages the last commitTextureStage left bound on the vertex and pixel
 		/// stages, and how many UAVs, so the next one binds up to the last stage in use - or still
@@ -4592,7 +4656,7 @@ namespace bgfx { namespace d3d11
 			bx::memCopy( (uint8_t*)mapped.pData + _offset, _data, _size);
 			deviceCtx->Unmap(m_ptr, 0);
 		}
-		else
+		else if (!s_renderD3D11->uploadBuffer(m_ptr, _offset, _data, _size) )
 		{
 			D3D11_BUFFER_DESC desc;
 			desc.ByteWidth = _size;
