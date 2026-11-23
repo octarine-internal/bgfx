@@ -2446,7 +2446,10 @@ namespace bgfx { namespace d3d11
 			}
 			m_occlusionQuery.postReset();
 
-			if (NULL == m_backBufferDepthStencil)
+			// Octarine: a back buffer the embedder hands over comes with the depth-stencil it wants, or with
+			// none when nothing drawn into it tests depth or stencil
+			if (NULL == m_backBufferDepthStencil
+			&& (NULL != m_swapChain || NULL == g_platformData.backBuffer) )
 			{
 				D3D11_TEXTURE2D_DESC dsd;
 				dsd.Width  = m_scd.width;
